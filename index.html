@@ -541,7 +541,7 @@ function Line({ label, value, strong, sub, className = '' }) {
 }
 
 // ───────────── 규격 편집 폼 (편집 패널 · 빠른 계산 공용) ─────────────
-function OptionForm({ opt, set, settings, idp }) {
+function OptionForm({ opt, set, settings, idp, pickedPrice }) {
   const c = calcRow(opt, settings);
   const f = (key, label, kind, hint) => html`<${NumField} id=${idp + key} label=${label} kind=${kind} hint=${hint}
     value=${opt[key]} onChange=${(v) => set({ [key]: v })} error=${key === 'trialCount' || key === 'totalSales' ? c.qtyError : null} />`;
@@ -556,6 +556,11 @@ function OptionForm({ opt, set, settings, idp }) {
             ${f('targetPay', '목표 최종 결제금액', 'won', '쿠폰을 모두 쓴 뒤 고객이 내는 금액')}
             ${f('targetDiscount', '목표 전체 할인율', 'pct', '정상가 표시용')}
           </div>
+          ${pickedPrice != null ? html`
+            <button type="button" disabled=${num(opt.targetPay) === pickedPrice} onClick=${() => set({ targetPay: pickedPrice })}
+              class="self-start rounded-md border border-accent/50 bg-accent/5 px-3 py-1.5 text-sm font-medium text-accent hover:bg-accent/10 disabled:border-line disabled:bg-transparent disabled:text-muted">
+              ${num(opt.targetPay) === pickedPrice ? `✓ 가격 정하기 결과 적용됨 (${won(pickedPrice)})` : `가격 정하기 결과 넣기 (${won(pickedPrice)})`}
+            </button>` : null}
         </fieldset>
         <fieldset class="flex flex-col gap-3">
           <legend class="mb-2 text-sm font-semibold">할인 · 쿠폰</legend>
@@ -960,6 +965,7 @@ function LinkDialog({ open, onClose, items, calc, onLink }) {
 
 // ───────────── 가격 정하기: 경쟁 상품 가격 3~10개의 중앙값·평균값으로 목표 결제금액 정하기 ─────────────
 const PRICE_SLOTS = 10, PRICE_MIN = 3;
+const SIDE_KEY = 'fruit-margin-side-pricing';
 const emptyPricing = () => ({ name: '', prices: Array(PRICE_SLOTS).fill(''), basis: 'median', adjust: 0, unit: 100 });
 function priceStats(prices) {
   const v = prices.map(num).filter((x) => x > 0).sort((a, b) => a - b);
@@ -967,6 +973,16 @@ function priceStats(prices) {
   const mid = Math.floor(v.length / 2);
   return { n: v.length, values: v, min: v[0], max: v[v.length - 1],
     median: v.length % 2 ? v[mid] : (v[mid - 1] + v[mid]) / 2, mean: v.reduce((a, x) => a + x, 0) / v.length };
+}
+
+// 입력한 가격 → 기준가(중앙값/평균값) + 조정 → 반올림한 목표 결제금액. 3개 미만이면 price는 null
+function pickPrice(pricing) {
+  const p = pricing || emptyPricing();
+  const s = priceStats(p.prices);
+  const unit = num(p.unit ?? 100) || 1;
+  const base = s.n >= PRICE_MIN ? (p.basis === 'mean' ? s.mean : s.median) : null;
+  const price = base == null ? null : Math.max(0, Math.round((base + num(p.adjust)) / unit) * unit);
+  return { p, s, unit, base, price, enough: s.n >= PRICE_MIN };
 }
 
 function PriceStrip({ s, pick }) {
@@ -984,83 +1000,82 @@ function PriceStrip({ s, pick }) {
     </div>`;
 }
 
-function PricingPanel({ pricing, setPricing, products, onApplyQuick, onApplyOption }) {
+function PricingPanel({ pricing, setPricing, products, onApplyQuick, onApplyOption, onClose }) {
   const [target, setTarget] = useState('');
-  const p = pricing || emptyPricing();
+  const { p, s, unit, base, price, enough } = pickPrice(pricing);
   const set = (patch) => setPricing({ ...p, ...patch });
   const setPrice = (i, v) => set({ prices: p.prices.map((x, j) => (j === i ? v : x)) });
-  const s = priceStats(p.prices);
-  const enough = s.n >= PRICE_MIN;
-  const unit = num(p.unit ?? 100) || 1;
-  const base = enough ? (p.basis === 'mean' ? s.mean : s.median) : null;
-  const price = base == null ? null : Math.max(0, Math.round((base + num(p.adjust)) / unit) * unit);
   const specs = products.flatMap((pr) => pr.options.map((o) => ({ value: pr.id + '|' + o.id, label: `[${channelOf(pr) === 'toss' ? '토스' : '쿠팡'}] ${pr.name} · ${o.option || '규격 없음'}`, pid: pr.id, oid: o.id })));
   const sel = specs.find((x) => x.value === target);
   const choice = (key, label, value) => html`
-    <label class=${'flex cursor-pointer flex-col gap-1 rounded-lg border p-4 ' + (p.basis === key ? 'border-accent bg-accent/5' : 'border-line hover:bg-soft')}>
+    <label class=${'flex cursor-pointer flex-col gap-1 rounded-lg border p-3 ' + (p.basis === key ? 'border-accent bg-accent/5' : 'border-line hover:bg-soft')}>
       <span class="flex items-center gap-2 text-sm font-medium">
         <input type="radio" name="price-basis" value=${key} checked=${p.basis === key} onChange=${() => set({ basis: key })} class="accent-[rgb(var(--accent))]" />${label}
       </span>
-      <span class="text-xl font-bold tabular-nums">${enough ? won(value) : '–'}</span>
+      <span class="text-lg font-bold tabular-nums">${enough ? won(value) : '–'}</span>
     </label>`;
   return html`
-    <div id="panel-pricing" role="tabpanel" aria-labelledby="tab-pricing" class="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,22rem)]">
-      <section class="flex flex-col gap-4 rounded-xl border border-line bg-surface p-4 min-w-0" aria-label="경쟁 상품 가격">
-        <div class="flex flex-wrap items-end gap-3">
-          <div class="min-w-0 flex-1 basis-60"><${TextField} id="pr-name" label="상품 · 검색어 메모" value=${p.name} placeholder="예: 감홍사과 5kg" onChange=${(v) => set({ name: v })} /></div>
-          <button type="button" class="rounded-md px-3 py-2 text-sm text-muted hover:bg-soft hover:text-neg" onClick=${() => setPricing(emptyPricing())}>모두 지우기</button>
-        </div>
-        <div class="flex flex-wrap items-start gap-3">
-          <div class="min-w-0 flex-1 basis-64">
-            <h2 class="text-sm font-semibold">경쟁 상품 가격 <span class="font-normal text-muted">· 고객이 실제로 내는 가격, 최소 ${PRICE_MIN}개 · 최대 ${PRICE_SLOTS}개</span></h2>
-            <p class="text-xs text-muted text-pretty">검색 첫 페이지 상위 상품처럼 비교할 상품의 쿠폰 적용 후 가격을 넣으세요. 같은 규격(무게)끼리 넣어야 정확합니다.</p>
+    <div class="flex flex-col">
+      <div class="sticky top-0 z-header flex items-center gap-2 border-b border-line bg-surface px-4 py-3">
+        <h2 id="side-pricing-title" class="min-w-0 flex-1 text-base font-semibold">가격 정하기</h2>
+        <button type="button" class="rounded-md px-2 py-1 text-xs text-muted hover:bg-soft hover:text-neg" onClick=${() => setPricing(emptyPricing())}>모두 지우기</button>
+        <button type="button" aria-label="가격 정하기 닫기" class="flex size-8 items-center justify-center rounded-md text-lg text-muted hover:bg-soft hover:text-fg" onClick=${onClose}>×</button>
+      </div>
+      <div class="flex flex-col gap-4 p-4">
+        <${TextField} id="pr-name" label="상품 · 검색어 메모" value=${p.name} placeholder="예: 감홍사과 5kg" onChange=${(v) => set({ name: v })} />
+        <section class="flex flex-col gap-3" aria-label="경쟁 상품 가격">
+          <div class="flex items-start gap-2">
+            <div class="min-w-0 flex-1">
+              <h3 class="text-sm font-semibold">경쟁 상품 가격</h3>
+              <p class="text-xs text-muted text-pretty">쿠폰 적용 후 고객이 내는 가격을 ${PRICE_MIN}~${PRICE_SLOTS}개 넣으세요. 같은 규격끼리 넣어야 정확합니다.</p>
+            </div>
+            <button type="button" disabled=${s.n === 0} onClick=${() => set({ prices: Array(PRICE_SLOTS).fill('') })}
+              class="whitespace-nowrap rounded-md border border-line px-2.5 py-1.5 text-xs hover:bg-soft disabled:opacity-50">가격 1~${PRICE_SLOTS}번 초기화</button>
           </div>
-          <button type="button" disabled=${s.n === 0} onClick=${() => set({ prices: Array(PRICE_SLOTS).fill('') })}
-            class="whitespace-nowrap rounded-md border border-line px-3 py-1.5 text-sm hover:bg-soft disabled:opacity-50">가격 1~${PRICE_SLOTS}번 초기화</button>
-        </div>
-        <div class="grid grid-cols-2 gap-3 sm:grid-cols-5">
-          ${p.prices.map((v, i) => html`<${NumField} key=${i} id=${'pr-' + i} label=${`${i + 1}번`} kind="won" value=${v} onChange=${(x) => setPrice(i, x)} />`)}
-        </div>
-        ${enough ? html`<${PriceStrip} s=${s} pick=${p.basis} />`
-          : html`<p role="status" class="rounded-lg bg-warn/10 px-3 py-2 text-sm text-warn">가격을 ${PRICE_MIN}개 이상 입력하세요. 지금 ${s.n}개입니다.</p>`}
-      </section>
-
-      <section class="flex flex-col gap-4 rounded-xl border border-line bg-surface p-4 min-w-0" aria-label="가격 정하기">
-        <fieldset class="flex flex-col gap-2">
-          <legend class="mb-1 text-sm font-semibold">기준 고르기 <span class="font-normal text-muted">· 입력 ${s.n}개</span></legend>
-          <div class="grid grid-cols-2 gap-3">
-            ${choice('median', '중앙값', s.median)}
-            ${choice('mean', '평균값', s.mean)}
+          <div class="grid grid-cols-2 gap-2">
+            ${p.prices.map((v, i) => html`<${NumField} key=${i} id=${'pr-' + i} label=${`${i + 1}번`} kind="won" value=${v} onChange=${(x) => setPrice(i, x)} />`)}
           </div>
-          <p class="text-xs text-muted text-pretty">중앙값은 유난히 싸거나 비싼 상품의 영향을 덜 받습니다. 가격이 고르게 모여 있으면 평균값도 비슷합니다.</p>
-        </fieldset>
-        <div class="grid grid-cols-[minmax(0,1fr)_auto] items-start gap-3">
-          <${NumField} id="pr-adjust" label="기준가에서 조정" kind="won" value=${p.adjust} onChange=${(v) => set({ adjust: v })}
-            hint="예: −500 이면 기준가보다 500원 낮게" />
-          <label for="pr-unit" class="flex flex-col gap-1">
-            <span class="text-xs font-medium text-muted">반올림 단위</span>
-            <select id="pr-unit" value=${String(unit)} onChange=${(e) => set({ unit: Number(e.target.value) })} class="rounded-md border border-line bg-surface px-2 py-2 text-sm tabular-nums">
-              ${[10, 100, 1000].map((u) => html`<option key=${u} value=${String(u)}>${u.toLocaleString('ko-KR')}원</option>`)}
+          ${enough ? html`<${PriceStrip} s=${s} pick=${p.basis} />`
+            : html`<p role="status" class="rounded-lg bg-warn/10 px-3 py-2 text-sm text-warn">가격을 ${PRICE_MIN}개 이상 입력하세요. 지금 ${s.n}개입니다.</p>`}
+        </section>
+        <section class="flex flex-col gap-3 border-t border-line pt-4" aria-label="가격 결정">
+          <fieldset class="flex flex-col gap-2">
+            <legend class="mb-1 text-sm font-semibold">기준 고르기 <span class="font-normal text-muted">· 입력 ${s.n}개</span></legend>
+            <div class="grid grid-cols-2 gap-2">
+              ${choice('median', '중앙값', s.median)}
+              ${choice('mean', '평균값', s.mean)}
+            </div>
+            <p class="text-xs text-muted text-pretty">중앙값은 유난히 싸거나 비싼 상품의 영향을 덜 받습니다.</p>
+          </fieldset>
+          <div class="grid grid-cols-[minmax(0,1fr)_auto] items-start gap-2">
+            <${NumField} id="pr-adjust" label="기준가에서 조정" kind="won" value=${p.adjust} onChange=${(v) => set({ adjust: v })}
+              hint="예: −500 이면 500원 낮게" />
+            <label for="pr-unit" class="flex flex-col gap-1">
+              <span class="text-xs font-medium text-muted">반올림 단위</span>
+              <select id="pr-unit" value=${String(unit)} onChange=${(e) => set({ unit: Number(e.target.value) })} class="rounded-md border border-line bg-surface px-2 py-2 text-sm tabular-nums">
+                ${[10, 100, 1000].map((u) => html`<option key=${u} value=${String(u)}>${u.toLocaleString('ko-KR')}원</option>`)}
+              </select>
+            </label>
+          </div>
+          <div class="flex flex-col gap-1 rounded-lg bg-soft p-4" aria-live="polite">
+            <span class="text-xs text-muted">정한 가격 (목표 최종 결제금액)</span>
+            <span class="text-3xl font-bold tabular-nums">${price == null ? '–' : won(price)}</span>
+            ${price != null ? html`<span class="text-xs tabular-nums text-muted">${p.basis === 'mean' ? '평균값' : '중앙값'} ${won(base)}${num(p.adjust) ? ` ${num(p.adjust) > 0 ? '+' : '−'} ${won(Math.abs(num(p.adjust)))}` : ''}</span>` : null}
+          </div>
+          <button type="button" disabled=${price == null} onClick=${() => onApplyQuick(price)}
+            class="rounded-md bg-accent px-3 py-2 text-sm font-medium text-accent-fg disabled:opacity-50">빠른 계산에 넣기</button>
+          <div class="flex flex-col gap-2 border-t border-line pt-3">
+            <label for="pr-target" class="text-xs font-medium text-muted">상품 규격에 바로 넣기</label>
+            <select id="pr-target" value=${target} onChange=${(e) => setTarget(e.target.value)} class="w-full min-w-0 rounded-md border border-line bg-surface px-2 py-2 text-sm">
+              <option value="">규격 선택</option>
+              ${specs.map((x) => html`<option key=${x.value} value=${x.value}>${x.label}</option>`)}
             </select>
-          </label>
-        </div>
-        <div class="flex flex-col gap-1 rounded-lg bg-soft p-4">
-          <span class="text-xs text-muted">정한 가격 (목표 최종 결제금액)</span>
-          <span class="text-3xl font-bold tabular-nums">${price == null ? '–' : won(price)}</span>
-          ${price != null ? html`<span class="text-xs tabular-nums text-muted">${p.basis === 'mean' ? '평균값' : '중앙값'} ${won(base)}${num(p.adjust) ? ` ${num(p.adjust) > 0 ? '+' : '−'} ${won(Math.abs(num(p.adjust)))}` : ''}</span>` : null}
-        </div>
-        <button type="button" disabled=${price == null} onClick=${() => onApplyQuick(price)}
-          class="rounded-md bg-accent px-3 py-2 text-sm font-medium text-accent-fg disabled:opacity-50">빠른 계산에서 마진 보기</button>
-        <div class="flex flex-col gap-2 border-t border-line pt-4">
-          <label for="pr-target" class="text-xs font-medium text-muted">상품 규격에 바로 적용</label>
-          <select id="pr-target" value=${target} onChange=${(e) => setTarget(e.target.value)} class="w-full rounded-md border border-line bg-surface px-2 py-2 text-sm">
-            <option value="">규격 선택</option>
-            ${specs.map((x) => html`<option key=${x.value} value=${x.value}>${x.label}</option>`)}
-          </select>
-          <button type="button" disabled=${price == null || !sel} onClick=${() => onApplyOption(sel.pid, sel.oid, price, sel.label)}
-            class="rounded-md border border-line px-3 py-2 text-sm hover:bg-soft disabled:opacity-50">이 규격의 목표 결제금액으로 넣기</button>
-        </div>
-      </section>
+            <button type="button" disabled=${price == null || !sel} onClick=${() => onApplyOption(sel.pid, sel.oid, price, sel.label)}
+              class="rounded-md border border-line px-3 py-2 text-sm hover:bg-soft disabled:opacity-50">이 규격의 목표 결제금액으로 넣기</button>
+            <p class="text-xs text-muted text-pretty">규격 편집 창에서도 "가격 정하기 결과 넣기"로 가져올 수 있습니다.</p>
+          </div>
+        </section>
+      </div>
     </div>`;
 }
 
@@ -1301,6 +1316,14 @@ function App() {
     : [calcSave, anSave].includes('saved') ? 'saved' : 'idle';
   const [tab, setTab] = useState('list');
   const [channel, setChannel] = useState('coupang');
+  const [sideOpen, setSideOpen] = useState(() => { try { return localStorage.getItem(SIDE_KEY) === 'open'; } catch (e) { return false; } });
+  useEffect(() => { try { localStorage.setItem(SIDE_KEY, sideOpen ? 'open' : 'closed'); } catch (e) {} }, [sideOpen]);
+  // 좁은 화면에서 서랍으로 열렸을 때 Esc로 닫기
+  useEffect(() => {
+    const onKey = (e) => { if (e.key === 'Escape' && sideOpen && !matchMedia('(min-width: 1024px)').matches && !document.querySelector('dialog[open]')) setSideOpen(false); };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [sideOpen]);
   const [editing, setEditing] = useState(null); // {pid, oid}
   const [confirm, setConfirm] = useState(null);
   const [notice, setNotice] = useState(null); // {kind, text}
@@ -1394,7 +1417,8 @@ function App() {
     : mode === 'browser' ? (saveState === 'error' ? '이 브라우저에 저장 실패' : '이 브라우저에만 저장') : '';
 
   return html`
-    <div class="min-h-dvh">
+    <div class="min-h-dvh lg:flex">
+     <div class="min-w-0 flex-1">
       <header class="wrap border-b border-line bg-surface">
         <div class="mx-auto flex max-w-6xl flex-wrap items-center gap-x-6 gap-y-3 py-4">
           <div class="flex min-w-0 flex-1 basis-60 flex-col">
@@ -1402,6 +1426,8 @@ function App() {
             <p class="text-xs text-muted">쿠팡·토스 판매가 역산 · 개당 마진 · 월별 판매 분석 <span aria-live="polite" class=${saveState === 'error' ? 'text-neg' : ''}>· ${saveLabel}</span></p>
           </div>
           <div class="flex flex-wrap gap-2">
+            <button type="button" aria-expanded=${sideOpen} aria-controls="side-pricing" onClick=${() => setSideOpen((v) => !v)}
+              class=${'rounded-md border px-3 py-2 text-sm ' + (sideOpen ? 'border-accent bg-accent/10 font-medium text-accent' : 'border-line hover:bg-soft')}>가격 정하기</button>
             <button type="button" aria-label=${dark ? '라이트 모드로 전환' : '다크 모드로 전환'} title=${dark ? '라이트 모드' : '다크 모드'}
               class="flex size-9 items-center justify-center rounded-md border border-line text-muted hover:bg-soft hover:text-fg" onClick=${toggleTheme}>
               ${dark ? html`<${SunIcon} />` : html`<${MoonIcon} />`}
@@ -1429,13 +1455,12 @@ function App() {
             </div>` : null}
 
           <div role="tablist" aria-label="보기" class="flex gap-1 border-b border-line">
-            ${[['list', '상품별 계산'], ['pricing', '가격 정하기'], ['quick', '빠른 계산'], ['analysis', '월별 분석']].map(([k, label]) => html`
+            ${[['list', '상품별 계산'], ['quick', '빠른 계산'], ['analysis', '월별 분석']].map(([k, label]) => html`
               <button key=${k} role="tab" type="button" aria-selected=${tab === k} id=${'tab-' + k} aria-controls=${'panel-' + k}
                 class=${'-mb-px border-b-2 px-3 py-2 text-sm font-medium ' + (tab === k ? 'border-accent text-fg' : 'border-transparent text-muted hover:text-fg')}
                 onClick=${() => setTab(k)}>${label}</button>`)}
           </div>
 
-          ${tab !== 'pricing' ? html`
           <div class="flex flex-wrap items-center gap-3">
             <div role="tablist" aria-label="판매처" class="inline-flex rounded-lg border border-line bg-soft p-1">
               ${CHANNELS.map(([k, label]) => html`
@@ -1454,7 +1479,6 @@ function App() {
               ? `${chName} 판매수수료율을 입력하세요. 비어 있으면 수수료 0%로 계산돼 마진이 실제보다 크게 나옵니다.`
               : '수수료율은 개당 마진과 체험단 가구매 수수료에 함께 적용됩니다. 체험단은 빈박스 발송이라 매입원가가 들어가지 않습니다.'}</p>
           </section>
-          ` : null}
 
           ${tab === 'analysis' ? (channel === 'coupang'
             ? html`<${AnalysisPanel} an=${an} setAn=${setAn} calc=${{ ...data, settings: data.settings, products: chProducts }} onLink=${onLink} setConfirm=${setConfirm} setNotice=${setNotice} />`
@@ -1464,10 +1488,6 @@ function App() {
                 <h2 class="text-sm font-semibold">토스 판매 파일 분석</h2>
                 <p class="max-w-md text-sm text-muted text-pretty">토스에서 받는 판매 엑셀 양식이 아직 정해지지 않아 분석 기능은 비어 있습니다. 샘플 파일을 주시면 쿠팡과 같은 방식으로 월별 분석을 만들겠습니다.</p>
               </div>`)
-          : tab === 'pricing' ? html`<${PricingPanel} pricing=${data.priceSet || data.pricing?.coupang} products=${data.products}
-              setPricing=${(v) => setData((d) => ({ ...d, priceSet: v }))}
-              onApplyQuick=${(price) => { setQuick((q) => ({ ...q, targetPay: price })); setTab('quick'); }}
-              onApplyOption=${(pid, oid, price, label) => { setOption(pid, oid, { targetPay: price }); setNotice({ kind: 'ok', text: `${label}의 목표 결제금액을 ${won(price)}으로 바꿨습니다.` }); }} />`
           : tab === 'list' ? html`
             <div id="panel-list" role="tabpanel" aria-labelledby="tab-list" class="flex flex-col gap-4">
               <${Summary} t=${totals} />
@@ -1529,11 +1549,22 @@ function App() {
               <button type="button" class="rounded-md bg-accent px-3 py-2 text-sm font-medium text-accent-fg" onClick=${() => setEditing(null)}>완료</button>
             </div>
             <div class="p-5">
-              <${OptionForm} opt=${edOpt} set=${(patch) => setOption(ed.id, edOpt.id, patch)} settings=${g} idp=${'e-' + edOpt.id + '-'} />
+              <${OptionForm} opt=${edOpt} set=${(patch) => setOption(ed.id, edOpt.id, patch)} settings=${g} idp=${'e-' + edOpt.id + '-'} pickedPrice=${pickPrice(data.priceSet || data.pricing?.coupang).price} />
             </div>
           </div>`}
       </${Modal}>
       <${Confirm} state=${confirm} onClose=${() => setConfirm(null)} />
+     </div>
+      ${sideOpen ? html`
+        <div class="fixed inset-0 z-drawer bg-black/40 lg:hidden" aria-hidden="true" onClick=${() => setSideOpen(false)}></div>
+        <aside id="side-pricing" aria-labelledby="side-pricing-title"
+          class="fixed inset-y-0 right-0 z-drawer w-full max-w-sm overflow-y-auto border-l border-line bg-surface shadow-xl lg:sticky lg:top-0 lg:z-auto lg:h-dvh lg:w-[22rem] lg:max-w-none lg:shrink-0 lg:self-start lg:shadow-none"
+          style=${{ paddingRight: 'env(safe-area-inset-right, 0px)', paddingBottom: 'env(safe-area-inset-bottom, 0px)' }}>
+          <${PricingPanel} pricing=${data.priceSet || data.pricing?.coupang} products=${data.products} onClose=${() => setSideOpen(false)}
+            setPricing=${(v) => setData((d) => ({ ...d, priceSet: v }))}
+            onApplyQuick=${(price) => { setQuick((q) => ({ ...q, targetPay: price })); setTab('quick'); setNotice({ kind: 'ok', text: `빠른 계산의 목표 결제금액을 ${won(price)}으로 바꿨습니다.` }); }}
+            onApplyOption=${(pid, oid, price, label) => { setOption(pid, oid, { targetPay: price }); setNotice({ kind: 'ok', text: `${label}의 목표 결제금액을 ${won(price)}으로 바꿨습니다.` }); }} />
+        </aside>` : null}
     </div>`;
 }
 

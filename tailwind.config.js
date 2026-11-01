@@ -7,7 +7,7 @@ module.exports = {
       colors: Object.fromEntries(['bg', 'surface', 'soft', 'line', 'fg', 'muted', 'accent', 'accent-fg', 'pos', 'neg', 'warn']
         .map((k) => [k, `rgb(var(--${k}) / <alpha-value>)`])),
       fontFamily: { sans: ['var(--font-sans)'] },
-      zIndex: { header: '10', dialog: '50' },
+      zIndex: { header: '10', drawer: '40', dialog: '50' },
     },
   },
 };
