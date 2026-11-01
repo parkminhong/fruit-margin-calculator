@@ -1,0 +1,1421 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>과일 마진 계산기</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+KR:wght@400;500;600;700&display=swap">
+<style>
+  /* 레이아웃: 상단 요약 띠 → 상품별 규격 표 → 행 클릭 시 편집 패널. 숫자는 모두 표 정렬(tabular) */
+  :root {
+    --bg: 250 250 249; --surface: 255 255 255; --soft: 245 245 244; --line: 231 229 228;
+    --fg: 28 25 23; --muted: 120 113 108;
+    --accent: 234 88 12; --accent-fg: 255 255 255;
+    --pos: 4 120 87; --neg: 220 38 38; --warn: 180 83 9;
+    --font-sans: "IBM Plex Sans KR", "Apple SD Gothic Neo", "Malgun Gothic", system-ui, sans-serif;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: 12 10 9; --surface: 28 25 23; --soft: 41 37 36; --line: 68 64 60;
+      --fg: 245 245 244; --muted: 168 162 158;
+      --accent: 251 146 60; --accent-fg: 28 25 23;
+      --pos: 52 211 153; --neg: 248 113 113; --warn: 251 191 36;
+      color-scheme: dark;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: 12 10 9; --surface: 28 25 23; --soft: 41 37 36; --line: 68 64 60;
+    --fg: 245 245 244; --muted: 168 162 158;
+    --accent: 251 146 60; --accent-fg: 28 25 23;
+    --pos: 52 211 153; --neg: 248 113 113; --warn: 251 191 36;
+    color-scheme: dark;
+  }
+  body { margin: 0; font-size: 14px; background: rgb(var(--bg)); color: rgb(var(--fg)); font-family: var(--font-sans); }
+  .wrap { padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); }
+  dialog::backdrop { background: rgb(0 0 0 / 0.45); }
+  dialog { color: rgb(var(--fg)); }
+  input[type="text"] { font-variant-numeric: tabular-nums; }
+  :focus-visible { outline: 2px solid rgb(var(--accent)); outline-offset: 2px; }
+  #boot { padding: 48px 16px; color: rgb(var(--muted)); text-align: center; }
+</style>
+
+<link rel="stylesheet" href="assets/tailwind.css">
+<script src="vendor/react.production.min.js"></script>
+<script src="vendor/react-dom.production.min.js"></script>
+<script src="vendor/htm.umd.js"></script>
+<script src="vendor/xlsx.full.min.js"></script>
+
+</head>
+<body>
+<div id="root"><p id="boot">계산기를 불러오는 중…</p></div>
+
+<script>
+// ───────────── 계산 엔진 (엑셀 '과일 계산기' 시트 수식과 동일, 49개 행 검증 완료) ─────────────
+const ceilTo = (v, unit) => Math.ceil(Math.round(v / unit * 1e9) / 1e9) * unit;
+const num = (v) => (v === '' || v == null || isNaN(+v) ? 0 : +v);
+const blank = (v) => v === '' || v == null;
+
+function calcRow(r, g) {
+  const fee = num(g.feeRate), unit = num(g.priceUnit) || 1, adVat = num(g.adVat);
+  const C = num(r.cost), D = num(r.extraCost), E = num(r.targetPay),
+    H1 = num(r.instantCoupon), H2 = num(r.downloadCoupon), I = num(r.targetDiscount);
+  const K = ceilTo(E + H1 + H2, unit);
+  // 즉시할인 쿠폰(정액) → 다운로드 쿠폰 순서로 차감
+  const M1 = Math.min(H1, K);
+  const M2 = Math.min(H2, Math.max(0, K - M1));
+  const N = Math.max(0, K - M1 - M2);
+  const J = I < 1 ? Math.max(K, ceilTo(N / (1 - I), unit)) : K;
+  const O = J ? 1 - N / J : 0;
+  const P = N * (1 - fee) - C - D;
+  const Q = N ? P / N : 0;
+  const S = num(r.trialCount), U = num(r.totalSales);
+  let qtyError = null;
+  if (U < 0 || S < 0) qtyError = '수량은 0 이상이어야 합니다';
+  else if (!Number.isInteger(U) || !Number.isInteger(S)) qtyError = '수량은 정수로 입력하세요';
+  else if (S > U) qtyError = '체험단개수가 총판매개수보다 많습니다';
+  const R = qtyError ? null : U - S;
+  const V = R == null ? null : R * P;
+  // 체험단은 빈박스 발송이라 매입원가 없음: 지급 단가 + 가구매 결제액에 붙는 판매수수료
+  const X = blank(r.trialCount) || blank(r.trialPrice) ? 0 : S * num(r.trialPrice) + N * S * fee;
+  const W = num(r.adCost), AA = num(r.cs);
+  const Y = V == null ? null : V - W - X;
+  const Z = P > 0 ? (N / P) * (1 + adVat) : null;
+  const AB = Y == null ? null : Y - AA;
+  return { listPrice: J, salePrice: K, instantCouponAmt: M1, downloadCouponAmt: M2, pay: N, finalDiscount: O,
+    margin: P, marginRate: Q, realSales: R, qtyError, revenue: V, adCost: W, trialCost: X,
+    netAfterCost: Y, endRoas: Z, cs: AA, finalNet: AB };
+}
+
+function calcTotals(rows, g) {
+  const t = { order: 0, fakeBuy: 0, gross: 0, realGross: 0, realSales: 0, trial: 0, total: 0,
+    revenue: 0, ad: 0, trialCost: 0, netAfterCost: 0, cs: 0, finalNet: 0, errors: 0 };
+  for (const r of rows) {
+    const c = calcRow(r, g);
+    t.fakeBuy += c.pay * num(r.trialCount);
+    t.gross += c.pay * num(r.totalSales);
+    t.trial += num(r.trialCount); t.total += num(r.totalSales);
+    t.ad += c.adCost; t.trialCost += c.trialCost; t.cs += c.cs;
+    if (c.qtyError) { t.errors++; continue; }
+    t.order += num(r.cost) * c.realSales;
+    t.realGross += c.pay * c.realSales;
+    t.realSales += c.realSales; t.revenue += c.revenue;
+    t.netAfterCost += c.netAfterCost; t.finalNet += c.finalNet;
+  }
+  return t;
+}
+</script>
+
+<script>
+// ───────────── 판매분석 엔진 (쿠팡 비즈니스 인사이트 → 주문일 기준 월별) ─────────────
+const toNum = (v) => {
+  if (typeof v === 'number') return v;
+  const n = parseFloat(String(v ?? '').replace(/[,%원\s]/g, ''));
+  return isNaN(n) ? 0 : n;
+};
+const pad2 = (n) => String(n).padStart(2, '0');
+const ymd = (d) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+function toDateStr(v) {
+  if (v instanceof Date && !isNaN(v)) return ymd(v);
+  if (typeof v === 'number' && v > 20000 && v < 80000) return ymd(new Date(Math.round((v - 25569) * 864e5) + new Date().getTimezoneOffset() * 6e4));
+  const m = String(v ?? '').trim().match(/^(\d{4})[-./]?(\d{1,2})[-./]?(\d{1,2})/);
+  return m ? `${m[1]}-${pad2(m[2])}-${pad2(m[3])}` : null;
+}
+const monthOf = (d) => d.slice(0, 7);
+const addDays = (s, n) => { const d = new Date(s + 'T00:00:00'); d.setDate(d.getDate() + n); return ymd(d); };
+const daysBetween = (a, b) => Math.round((new Date(b + 'T00:00:00') - new Date(a + 'T00:00:00')) / 864e5) + 1;
+const monthEnd = (m) => { const [y, mo] = m.split('-').map(Number); return `${m}-${pad2(new Date(y, mo, 0).getDate())}`; };
+const prevMonth = (m) => { const [y, mo] = m.split('-').map(Number); return mo === 1 ? `${y - 1}-12` : `${y}-${pad2(mo - 1)}`; };
+const nextMonth = (m) => { const [y, mo] = m.split('-').map(Number); return mo === 12 ? `${y + 1}-01` : `${y}-${pad2(mo + 1)}`; };
+function monthsIn(from, to) { const out = []; for (let m = monthOf(from); m <= monthOf(to); m = nextMonth(m)) out.push(m); return out; }
+
+const DAILY_COLS = { date: '날짜', visitors: '방문자', views: '조회', cart: '장바구니', orders: '주문', qty: '판매량', revenue: '매출(원)' };
+const ITEM_COLS = { optionId: '옵션 ID', optionName: '옵션명', productName: '상품명', productId: '등록상품ID', revenue: '매출(원)', orders: '주문',
+  qty: '판매량', visitors: '방문자', views: '조회', cart: '장바구니', winner: '아이템위너 비율(%)', grossRevenue: '총 매출(원)', grossQty: '총 판매수',
+  cancelAmt: '총 취소 금액(원)', cancelQty: '총 취소된 상품수', instantCancelQty: '즉시 취소된 상품수' };
+const ITEM_NUMS = ['revenue', 'orders', 'qty', 'visitors', 'views', 'cart', 'grossRevenue', 'grossQty', 'cancelAmt', 'cancelQty', 'instantCancelQty'];
+const ADDITIVE = ['revenue', 'orders', 'qty', 'visitors', 'views', 'cart', 'grossRevenue', 'grossQty', 'cancelAmt', 'cancelQty', 'instantCancelQty'];
+
+// 시트 하나를 읽어 기간별(daily) 또는 상품별(items) 자료로 판별
+function parseInsightsSheet(aoa) {
+  const norm = (c) => String(c ?? '').replace(/\s+/g, ' ').trim();
+  for (let h = 0; h < Math.min(aoa.length, 10); h++) {
+    const head = aoa[h].map(norm);
+    const col = (label) => head.indexOf(label);
+    if (col('옵션 ID') >= 0 && col('판매량') >= 0) {
+      const idx = Object.fromEntries(Object.entries(ITEM_COLS).map(([k, l]) => [k, col(l)]));
+      const rows = [];
+      for (const r of aoa.slice(h + 1)) {
+        const optionId = String(r[idx.optionId] ?? '').trim();
+        if (!optionId) continue;
+        const row = { optionId, optionName: String(r[idx.optionName] ?? ''), productName: String(r[idx.productName] ?? ''),
+          productId: String(r[idx.productId] ?? '').trim() || optionId, winner: toNum(r[idx.winner]) };
+        for (const k of ITEM_NUMS) row[k] = idx[k] >= 0 ? toNum(r[idx[k]]) : 0;
+        for (const k of ['cancelAmt', 'cancelQty', 'instantCancelQty']) row[k] = Math.abs(row[k]);
+        rows.push(row);
+      }
+      return { kind: 'items', rows };
+    }
+    if (col('날짜') >= 0 && col('판매량') >= 0) {
+      const idx = Object.fromEntries(Object.entries(DAILY_COLS).map(([k, l]) => [k, col(l)]));
+      const rows = [];
+      let total = null;
+      for (const r of aoa.slice(h + 1)) {
+        const vals = Object.fromEntries(Object.keys(DAILY_COLS).filter((k) => k !== 'date').map((k) => [k, idx[k] >= 0 ? toNum(r[idx[k]]) : 0]));
+        const date = toDateStr(r[idx.date]);
+        if (date) rows.push({ date, ...vals });
+        else if (r.some((c) => String(c).trim() !== '')) total = vals; // 날짜 없는 마지막 합계 행
+      }
+      rows.sort((a, b) => (a.date < b.date ? -1 : 1));
+      return { kind: 'daily', rows, total, from: rows[0]?.date, to: rows[rows.length - 1]?.date };
+    }
+  }
+  return null;
+}
+
+// 기간 [from,to] 자료를 월별로 나누는 비율. 기간별(일별) 자료가 있으면 그 달 실적 비중, 없으면 일수 비중
+function monthShares(daily, from, to) {
+  const months = monthsIn(from, to);
+  if (months.length === 1) return { [months[0]]: { q: 1, r: 1, v: 1, estimated: false } };
+  const sums = Object.fromEntries(months.map((m) => [m, { q: 0, r: 0, v: 0, d: 0 }]));
+  let covered = 0;
+  for (let d = from; d <= to; d = addDays(d, 1)) {
+    const s = sums[monthOf(d)]; s.d++;
+    const row = daily[d];
+    if (row) { covered++; s.q += row.qty; s.r += row.revenue; s.v += row.visitors; }
+  }
+  const tot = (k) => months.reduce((a, m) => a + sums[m][k], 0);
+  const T = { q: tot('q'), r: tot('r'), v: tot('v'), d: tot('d') };
+  const share = (m, k) => (covered && T[k] > 0 ? sums[m][k] / T[k] : sums[m].d / T.d);
+  return Object.fromEntries(months.map((m) => [m, { q: share(m, 'q'), r: share(m, 'r'), v: share(m, 'v'), estimated: true }]));
+}
+
+// 상품별 묶음(batch)과 일별 자료를 월별로 정리
+function buildMonths(an) {
+  const months = {};
+  const ensure = (m) => (months[m] ||= { month: m, days: [], items: {}, estimated: false, batches: [] });
+  for (const date of Object.keys(an.daily || {}).sort()) ensure(monthOf(date)).days.push({ date, ...an.daily[date] });
+  for (const b of an.batches || []) {
+    const shares = monthShares(an.daily || {}, b.from, b.to);
+    for (const [m, s] of Object.entries(shares)) {
+      const M = ensure(m);
+      M.batches.push(b.id);
+      if (s.estimated) M.estimated = true;
+      for (const r of b.rows) {
+        const it = (M.items[r.optionId] ||= { optionId: r.optionId, optionName: r.optionName, productName: r.productName, productId: r.productId,
+          ...Object.fromEntries(ADDITIVE.map((k) => [k, 0])), winnerW: 0 });
+        for (const k of ADDITIVE) it[k] += r[k] * (k === 'revenue' || k === 'grossRevenue' || k === 'cancelAmt' ? s.r : k === 'visitors' || k === 'views' || k === 'cart' ? s.v : s.q);
+        it.winnerW += r.winner * r.visitors * s.v;
+      }
+    }
+  }
+  return months;
+}
+
+// 옵션명/규격에서 무게(kg) 추출: "1박스, 3kg 당도선별" → 3, "500g" → 0.5, "5" → 5
+function specKg(s) {
+  const all = [...String(s).matchAll(/(\d+(?:\.\d+)?)\s*(kg|g)\b/gi)];
+  if (all.length) { const [, n, u] = all[all.length - 1]; return u.toLowerCase() === 'g' ? +n / 1000 : +n; }
+  const m = String(s).trim().match(/^(\d+(?:\.\d+)?)$/);
+  return m ? +m[1] : null;
+}
+const normName = (s) => String(s).replace(/\[[^\]]*\]/g, '').replace(/\s+/g, '');
+function dice(a, b) {
+  const grams = (s) => { const out = new Map(); for (let i = 0; i < s.length - 1; i++) { const g = s.slice(i, i + 2); out.set(g, (out.get(g) || 0) + 1); } return out; };
+  const A = grams(a), B = grams(b); let inter = 0, n = 0;
+  for (const [g, c] of A) { inter += Math.min(c, B.get(g) || 0); n += c; }
+  for (const c of B.values()) n += c;
+  return n ? (2 * inter) / n : 0;
+}
+const idsOf = (o) => String(o.optionId ?? '').split(/[\s,]+/).filter(Boolean);
+
+// 계산기 규격 묶음 (상품명 + 규격). 같은 이름으로 여러 가격 구간이 있으면 한 묶음으로 본다
+function calcGroups(calc) {
+  const groups = new Map();
+  for (const p of calc.products) for (const o of p.options) {
+    const key = p.name + '\u0000' + o.option;
+    if (!groups.has(key)) groups.set(key, { key, name: p.name, option: o.option, kg: specKg(o.option), blocks: [] });
+    groups.get(key).blocks.push(o);
+  }
+  return [...groups.values()];
+}
+
+const sameTitle = (a, b) => String(a).replace(/\s+/g, ' ').trim() === String(b).replace(/\s+/g, ' ').trim();
+
+// 쿠팡 상품명과 제목이 같은 계산기 상품을 먼저 찾고, 없으면 가장 비슷한 제목(0.5 이상)을 쓴다
+function titleFor(productName, calc) {
+  const names = [...new Set(calc.products.map((p) => p.name))];
+  const exact = names.find((n) => sameTitle(n, productName));
+  if (exact) return { name: exact, exact: true };
+  let best = null;
+  for (const n of names) { const score = dice(normName(productName), normName(n)); if (!best || score > best.score) best = { name: n, score }; }
+  return best && best.score >= 0.5 ? { name: best.name, exact: false } : null;
+}
+
+// 그 제목의 계산기 상품 안에서 무게(kg)가 같은 규격에 옵션을 연결
+function linkKeyIn(title, optionName, groups) {
+  const kg = specKg(optionName);
+  const gr = kg == null ? null : groups.find((g) => g.name === title && g.kg === kg);
+  return gr ? gr.key : '';
+}
+
+function suggestLinks(items, calc) {
+  const groups = calcGroups(calc);
+  const out = [];
+  for (const it of items) {
+    const t = titleFor(it.productName, calc);
+    const key = t ? linkKeyIn(t.name, it.optionName, groups) : '';
+    if (key) out.push({ optionId: it.optionId, key, exact: t.exact });
+  }
+  return out;
+}
+
+// 그 달에 적용할 단가: 연결된 가격 구간들을 적용 기간 겹치는 일수로, 기간이 없으면 계산기 총판매개수로 가중평균
+function unitFor(blocks, m) {
+  if (!blocks.length) return null;
+  const from = `${m}-01`, to = monthEnd(m);
+  const dated = blocks.every((b) => b.periodFrom && b.periodTo);
+  let ws = blocks.map((b) => {
+    if (dated) { const a = b.periodFrom > from ? b.periodFrom : from, z = b.periodTo < to ? b.periodTo : to; return a <= z ? daysBetween(a, z) : 0; }
+    return Math.max(0, num(b.totalSales));
+  });
+  if (!ws.some((w) => w > 0)) ws = blocks.map(() => 1);
+  const W = ws.reduce((a, w) => a + w, 0);
+  const avg = (f) => blocks.reduce((a, b, i) => a + ws[i] * f(b), 0) / W;
+  return { cost: avg((b) => num(b.cost) + num(b.extraCost)), coupon: avg((b) => num(b.instantCoupon) + num(b.downloadCoupon)),
+    salePrice: avg((b) => calcRow(b, { priceUnit: 100 }).salePrice), dated, blocks: blocks.length };
+}
+
+// 쿠폰 화면의 '사용 금액'은 쿠폰 기간 누적이라, 지난달까지 입력한 누적을 빼서 그 달 사용분을 구한다
+function couponUsage(c, m) {
+  const v = c.cum?.[m];
+  if (v === '' || v == null) return null;
+  const prev = Object.keys(c.cum).filter((k) => k < m && c.cum[k] !== '' && c.cum[k] != null).sort().pop();
+  return Math.max(0, num(v) - (prev ? num(c.cum[prev]) : 0));
+}
+
+function analyzeMonth(an, calc, months, m) {
+  const g = calc.settings, fee = num(g.feeRate);
+  const M = months[m];
+  const byId = new Map();
+  for (const p of calc.products) for (const o of p.options) for (const id of idsOf(o)) { if (!byId.has(id)) byId.set(id, []); byId.get(id).push(o); }
+  const products = new Map();
+  for (const it of Object.values(M?.items || {})) {
+    if (!products.has(it.productId)) products.set(it.productId, { productId: it.productId, name: it.productName, options: [] });
+    products.get(it.productId).options.push({ ...it, unit: unitFor(byId.get(it.optionId) || [], m) });
+  }
+  const list = [];
+  for (const p of products.values()) {
+    const sum = (k) => p.options.reduce((a, o) => a + o[k], 0);
+    const qty = sum('qty'), revenue = sum('revenue');
+    const inp = an.inputs?.[m]?.[p.productId] || {};
+    const coupons = (an.coupons || []).filter((c) => c.productId === p.productId);
+    const usages = coupons.map((c) => couponUsage(c, m)).filter((v) => v != null);
+    const linkedSold = p.options.filter((o) => o.qty > 0);
+    const expectedCoupon = linkedSold.every((o) => o.unit) ? linkedSold.reduce((a, o) => a + o.qty * o.unit.coupon, 0) : null;
+    const coupon = usages.length ? usages.reduce((a, v) => a + v, 0) : expectedCoupon;
+    const couponSource = usages.length ? 'entered' : expectedCoupon != null ? 'expected' : 'none';
+    const pay = revenue - (coupon || 0);
+    const commission = pay * fee;
+    const trialCount = num(inp.trialCount), trialPrice = num(inp.trialPrice);
+    const avgPay = qty ? pay / qty : 0;
+    const trialCost = trialCount * (avgPay + trialPrice); // 가구매 결제액 환급 + 체험단 지급액 (수수료는 위 수수료에 포함)
+    const realShare = qty > 0 ? Math.max(0, 1 - trialCount / qty) : 0;
+    const missingCost = linkedSold.filter((o) => !o.unit).length;
+    const goods = missingCost ? null : p.options.reduce((a, o) => a + (o.unit ? o.qty * realShare * o.unit.cost : 0), 0);
+    const ad = num(inp.ad), cs = num(inp.cs);
+    const net = goods == null ? null : pay - commission - trialCost - goods - ad - cs;
+    for (const o of p.options) o.couponShare = qty ? (coupon || 0) * (o.qty / qty) : 0;
+    list.push({ ...p, qty, revenue, grossQty: sum('grossQty'), cancelQty: sum('cancelQty'), cancelAmt: sum('cancelAmt'), visitors: sum('visitors'),
+      coupon, couponSource, expectedCoupon, couponCount: coupons.length, pay, commission, trialCount, trialPrice, trialCost, goods, missingCost, ad, cs, net });
+  }
+  list.sort((a, b) => b.revenue - a.revenue);
+  const days = M?.days || [];
+  const dsum = (k) => days.reduce((a, d) => a + d[k], 0);
+  const tot = (k) => list.reduce((a, p) => a + (p[k] || 0), 0);
+  const nets = list.filter((p) => p.qty || p.ad || p.cs);
+  return {
+    month: m, products: list, days, estimated: !!M?.estimated, hasItems: list.length > 0,
+    totals: { qty: tot('qty'), revenue: tot('revenue'), grossQty: tot('grossQty'), cancelQty: tot('cancelQty'), coupon: tot('coupon'),
+      pay: tot('pay'), commission: tot('commission'), goods: tot('goods'), trialCost: tot('trialCost'), ad: tot('ad'), cs: tot('cs'),
+      net: nets.reduce((a, p) => a + (p.net || 0), 0), netMissing: nets.filter((p) => p.net == null).length,
+      visitors: dsum('visitors'), orders: dsum('orders'), dailyQty: dsum('qty'), dailyRevenue: dsum('revenue') },
+  };
+}
+</script>
+
+<script>
+const { useState, useEffect, useRef, useMemo, useCallback } = React;
+const html = htm.bind(React.createElement);
+
+// ───────────── 형식 · 데이터 ─────────────
+const won = (v) => (v == null ? '–' : (Math.round(v) || 0).toLocaleString('ko-KR') + '원');
+const wonShort = (v) => (v == null ? '–' : (Math.round(v) || 0).toLocaleString('ko-KR'));
+const pct = (v, d = 1) => (v == null ? '–' : (v * 100).toFixed(d) + '%');
+const cnt = (v) => (v == null ? '–' : Math.round(v).toLocaleString('ko-KR') + '개');
+const uid = () => (crypto.randomUUID ? crypto.randomUUID() : String(Date.now() + Math.random()));
+const minus = (v) => (v ? '−' + won(v) : won(0));
+const tone = (v) => (v == null ? 'text-muted' : v < 0 ? 'text-neg' : 'text-fg');
+
+// 화면 테마: 이 브라우저에만 기억 (선택 전에는 시스템 설정을 따름)
+const THEME_KEY = 'fruit-margin-theme';
+try { const t = localStorage.getItem(THEME_KEY); if (t) document.documentElement.dataset.theme = t; } catch (e) {}
+const MoonIcon = () => html`<svg aria-hidden="true" viewBox="0 0 24 24" class="size-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>`;
+const SunIcon = () => html`<svg aria-hidden="true" viewBox="0 0 24 24" class="size-4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>`;
+
+const DEFAULT_SETTINGS = { feeRate: 0.1166, priceUnit: 100, adVat: 0.1 };
+// 판매처: 상품과 공통 설정(수수료율 등)을 판매처별로 따로 둔다. 토스 수수료율은 사용자가 확인해 입력
+const CHANNELS = [['coupang', '쿠팡'], ['toss', '토스']];
+const DEFAULT_TOSS_SETTINGS = { feeRate: '', priceUnit: 100, adVat: 0.1 };
+const settingsKey = (ch) => (ch === 'toss' ? 'tossSettings' : 'settings');
+const channelOf = (p) => p.channel || 'coupang';
+const emptyOption = (o = {}) => ({ id: uid(), option: '', cost: '', extraCost: 0, targetPay: '',
+  instantCoupon: 0, downloadCoupon: 0, targetDiscount: 0, trialCount: '', trialPrice: '', totalSales: '', adCost: '', cs: '', optionId: '', periodFrom: '', periodTo: '', ...o });
+
+const EXAMPLE = {
+  isExample: true,
+  settings: DEFAULT_SETTINGS,
+  tossSettings: DEFAULT_TOSS_SETTINGS,
+  products: [
+    { id: uid(), channel: 'coupang', name: '예시 · 산지직송 샤인머스캣', options: [
+      emptyOption({ option: '1kg', cost: 9800, targetPay: 16900, instantCoupon: 1000, downloadCoupon: 1000, targetDiscount: 0.5, totalSales: 120, trialCount: 10, trialPrice: 6600, adCost: 330000 }),
+      emptyOption({ option: '2kg', cost: 17500, targetPay: 29900, instantCoupon: 1000, downloadCoupon: 1000, targetDiscount: 0.5, totalSales: 64, trialCount: 0, adCost: 220000 }),
+    ] },
+    { id: uid(), channel: 'coupang', name: '예시 · 꿀당도 부사 사과', options: [
+      emptyOption({ option: '3kg', cost: 12400, targetPay: 22900, instantCoupon: 2000, targetDiscount: 0.55, totalSales: 88, trialCount: 8, trialPrice: 6600, adCost: 180000, cs: 15000 }),
+      emptyOption({ option: '5kg', cost: 19800, targetPay: 34900, instantCoupon: 2000, targetDiscount: 0.55, totalSales: 3, trialCount: 5 }),
+    ] },
+  ],
+};
+
+// 이전 버전의 단일 '정액쿠폰'은 즉시할인 쿠폰으로 옮기고, 쓰지 않는 즉시할인율·상한은 버림
+const migrate = (d) => d && ({ tossSettings: DEFAULT_TOSS_SETTINGS, ...d, products: d.products.map((p) => ({ channel: 'coupang', ...p, options: p.options.map(({ coupon, instantRate, instantCap, ...o }) =>
+  ({ instantCoupon: coupon ?? 0, downloadCoupon: 0, ...o })) })) });
+
+// ───────────── 저장: 이 브라우저(localStorage) ─────────────
+const LS_KEY = 'fruit-margin-calc-v1';
+const LS_AN_KEY = 'fruit-margin-analysis-v1';
+function useDoc(lsKey, initial, fix) {
+  const [data, setData] = useState(() => {
+    let saved = null;
+    try { saved = JSON.parse(localStorage.getItem(lsKey) || 'null'); } catch (e) {}
+    return fix(saved) || initial;
+  });
+  const [saveState, setSaveState] = useState('idle'); // idle | saved | error
+  const first = useRef(true);
+  useEffect(() => {
+    if (first.current) { first.current = false; return; }
+    const t = setTimeout(() => {
+      try { localStorage.setItem(lsKey, JSON.stringify(data)); setSaveState('saved'); } catch (e) { setSaveState('error'); }
+    }, 400);
+    return () => clearTimeout(t);
+  }, [data]);
+  return { data, setData, mode: 'browser', saveState };
+}
+
+// 파일 저장: 브라우저 다운로드
+function saveFile(filename, data, type) {
+  const url = URL.createObjectURL(new Blob([data], { type }));
+  const a = document.createElement('a');
+  a.href = url; a.download = filename;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+// ───────────── 엑셀 불러오기 / 내보내기 ─────────────
+const COLS = [
+  ['name', '상품명'], ['option', '규격'], ['optionId', '옵션 ID'], ['periodFrom', '적용 시작일'], ['periodTo', '적용 종료일'], ['cost', '매입원가'], ['extraCost', '추가원가'], ['targetPay', '목표 최종 결제금액'],
+  ['instantCoupon', ['즉시할인 쿠폰', '정액쿠폰']],
+  ['downloadCoupon', '다운로드 쿠폰'], ['targetDiscount', '목표 전체 할인율'],
+  ['trialCount', '체험단개수'], ['trialPrice', '체험단 단가'], ['totalSales', '총판매개수'], ['adCost', '광고비'], ['cs', 'CS 차감액'],
+];
+
+function parseWorkbook(buf) {
+  const wb = XLSX.read(buf, { type: 'array' });
+  const ws = wb.Sheets['과일 계산기'] || wb.Sheets[wb.SheetNames[0]];
+  const aoa = XLSX.utils.sheet_to_json(ws, { header: 1, raw: true, defval: '' });
+  const h = aoa.findIndex((r) => String(r[0]).trim() === '상품명');
+  if (h < 0) throw new Error('"상품명" 머리글이 있는 행을 찾지 못했습니다. 계산기 양식의 엑셀인지 확인하세요.');
+  const head = aoa[h].map((c) => String(c).replace(/\s+/g, ' ').trim());
+  const idx = {};
+  for (const [k, label] of COLS) idx[k] = head.findIndex((c) => [].concat(label).some((l) => c.startsWith(l)));
+  if (idx.option < 0 || idx.targetPay < 0) throw new Error('규격 또는 목표 최종 결제금액 열을 찾지 못했습니다.');
+
+  const settings = { ...DEFAULT_SETTINGS };
+  let settingsFound = false;
+  const pick = (label, key) => {
+    for (const r of aoa.slice(0, h)) {
+      const i = r.findIndex((c) => String(c).includes(label));
+      if (i >= 0) { const v = r.slice(i + 1).find((c) => typeof c === 'number'); if (v != null) { settings[key] = v; settingsFound = true; } }
+    }
+  };
+  pick('판매수수료율', 'feeRate'); pick('가격 단위', 'priceUnit'); pick('광고비 VAT', 'adVat');
+
+  const products = [];
+  for (const r of aoa.slice(h + 1)) {
+    const option = String(r[idx.option] ?? '').trim();
+    if (!option || typeof r[idx.targetPay] !== 'number') continue;
+    const o = emptyOption();
+    for (const [k] of COLS) if (idx[k] >= 0 && k !== 'name') o[k] = r[idx[k]] === '' ? (k === 'option' ? '' : o[k]) : r[idx[k]];
+    o.option = option;
+    o.optionId = String(o.optionId ?? '').trim();
+    o.periodFrom = toDateStr(o.periodFrom) || ''; o.periodTo = toDateStr(o.periodTo) || '';
+    const name = String(r[idx.name] ?? '').trim() || '이름 없는 상품';
+    const last = products[products.length - 1];
+    if (last && last.name === name) last.options.push(o);
+    else products.push({ id: uid(), name, options: [o] });
+  }
+  if (!products.length) throw new Error('불러올 규격 행이 없습니다.');
+  return { isExample: false, settings, settingsFound, products };
+}
+
+function buildWorkbook(data) {
+  const g = data.settings;
+  const head = ['상품명', '규격', '옵션 ID', '적용 시작일', '적용 종료일', '매입원가', '추가원가', '목표 최종 결제금액', '즉시할인 쿠폰(정액)', '다운로드 쿠폰(정액)', '목표 전체 할인율',
+    '쿠팡 정상가', '쿠팡 판매가', '즉시할인 쿠폰 금액', '다운로드 쿠폰 금액', '최종 결제금액', '최종 할인율', '개당 마진', '마진율',
+    '실제 판매개수', '체험단개수', '체험단 단가', '총판매개수', '수익', '광고비(쿠팡애즈)', '마케팅비(체험단)', '비용 차감 순수익', 'END ROAS', 'CS 차감액', '최종 순수익'];
+  const rows = [['판매수수료율', g.feeRate, '가격 단위', g.priceUnit, '광고비 VAT', g.adVat], [], head];
+  for (const p of data.products) for (const o of p.options) {
+    const c = calcRow(o, g);
+    rows.push([p.name, o.option, o.optionId || '', o.periodFrom || '', o.periodTo || '', num(o.cost), num(o.extraCost), num(o.targetPay), num(o.instantCoupon), num(o.downloadCoupon), num(o.targetDiscount),
+      c.listPrice, c.salePrice, c.instantCouponAmt, c.downloadCouponAmt, c.pay, c.finalDiscount, Math.round(c.margin), c.marginRate,
+      c.realSales ?? '수량확인', o.trialCount, o.trialPrice, o.totalSales, c.revenue == null ? '수량확인' : Math.round(c.revenue),
+      c.adCost, Math.round(c.trialCost), c.netAfterCost == null ? '수량확인' : Math.round(c.netAfterCost),
+      c.endRoas == null ? '산출불가' : +c.endRoas.toFixed(4), c.cs, c.finalNet == null ? '수량확인' : Math.round(c.finalNet)]);
+  }
+  const ws = XLSX.utils.aoa_to_sheet(rows);
+  ws['!cols'] = head.map((_, i) => ({ wch: i === 0 ? 36 : 12 }));
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, '과일 계산기');
+  return XLSX.write(wb, { type: 'array', bookType: 'xlsx' });
+}
+
+// ───────────── 입력 필드 ─────────────
+function NumField({ id, label, value, onChange, kind = 'won', hint, error }) {
+  const [draft, setDraft] = useState(null);
+  const shown = draft != null ? draft
+    : value === '' || value == null ? ''
+    : kind === 'pct' ? String(+(num(value) * 100).toFixed(2))
+    : kind === 'won' ? num(value).toLocaleString('ko-KR') : String(value);
+  const suffix = kind === 'pct' ? '%' : kind === 'won' ? '원' : '개';
+  const commit = (s) => {
+    const clean = s.replace(/[^0-9.\-]/g, '');
+    if (clean === '' || clean === '-') return onChange('');
+    const n = parseFloat(clean);
+    if (isNaN(n)) return;
+    onChange(kind === 'pct' ? n / 100 : n);
+  };
+  return html`
+    <label for=${id} class="flex flex-col gap-1 min-w-0">
+      <span class="text-xs font-medium text-muted">${label}</span>
+      <span class=${'flex items-center rounded-md border bg-surface px-2.5 focus-within:border-accent ' + (error ? 'border-neg' : 'border-line')}>
+        <input id=${id} type="text" inputmode=${kind === 'int' ? 'numeric' : 'decimal'} autocomplete="off"
+          class="w-full min-w-0 bg-transparent py-2 text-right text-sm outline-none" value=${shown}
+          onFocus=${() => setDraft(value === '' || value == null ? '' : kind === 'pct' ? String(+(num(value) * 100).toFixed(2)) : String(value))}
+          onChange=${(e) => { setDraft(e.target.value); commit(e.target.value); }}
+          onBlur=${() => setDraft(null)} />
+        <span class="pl-1.5 text-xs text-muted">${suffix}</span>
+      </span>
+      ${hint && !error ? html`<span class="text-xs text-muted text-pretty">${hint}</span>` : null}
+    </label>`;
+}
+
+function Line({ label, value, strong, sub, className = '' }) {
+  return html`
+    <div class=${'flex items-baseline justify-between gap-3 py-1.5 ' + className}>
+      <dt class=${strong ? 'text-sm font-semibold' : 'text-sm text-muted'}>${label}${sub ? html` <span class="text-xs text-muted">${sub}</span>` : null}</dt>
+      <dd class=${'tabular-nums text-right ' + (strong ? 'text-base font-semibold' : 'text-sm')}>${value}</dd>
+    </div>`;
+}
+
+// ───────────── 규격 편집 폼 (편집 패널 · 빠른 계산 공용) ─────────────
+function OptionForm({ opt, set, settings, idp }) {
+  const c = calcRow(opt, settings);
+  const f = (key, label, kind, hint) => html`<${NumField} id=${idp + key} label=${label} kind=${kind} hint=${hint}
+    value=${opt[key]} onChange=${(v) => set({ [key]: v })} error=${key === 'trialCount' || key === 'totalSales' ? c.qtyError : null} />`;
+  return html`
+    <div class="grid gap-6 md:grid-cols-[minmax(0,1fr)_minmax(0,20rem)]">
+      <div class="flex flex-col gap-6 min-w-0">
+        <fieldset class="flex flex-col gap-3">
+          <legend class="mb-2 text-sm font-semibold">가격 설정</legend>
+          <div class="grid grid-cols-2 gap-3">
+            ${f('cost', '매입원가', 'won')}
+            ${f('extraCost', '추가원가', 'won', '박스·택배비 등')}
+            ${f('targetPay', '목표 최종 결제금액', 'won', '쿠폰을 모두 쓴 뒤 고객이 내는 금액')}
+            ${f('targetDiscount', '목표 전체 할인율', 'pct', '정상가 표시용')}
+          </div>
+        </fieldset>
+        <fieldset class="flex flex-col gap-3">
+          <legend class="mb-2 text-sm font-semibold">할인 · 쿠폰</legend>
+          <div class="grid grid-cols-2 gap-3">
+            ${f('instantCoupon', '즉시할인 쿠폰 (정액)', 'won', '모든 고객에게 자동 적용')}
+            ${f('downloadCoupon', '다운로드 쿠폰 (정액)', 'won', '고객이 받아서 쓰는 쿠폰')}
+          </div>
+        </fieldset>
+        <fieldset class="flex flex-col gap-3">
+          <legend class="mb-2 text-sm font-semibold">판매 · 체험단</legend>
+          <div class="grid grid-cols-2 gap-3 sm:grid-cols-3">
+            ${f('totalSales', '총판매개수', 'int', '체험단 포함')}
+            ${f('trialCount', '체험단개수', 'int', '빈박스 발송')}
+            ${f('trialPrice', '체험단 단가', 'won', '1건당 실제 지출')}
+          </div>
+          ${c.qtyError ? html`<p role="alert" class="text-sm text-neg">${c.qtyError}</p>` : null}
+        </fieldset>
+        <fieldset class="flex flex-col gap-3">
+          <legend class="mb-2 text-sm font-semibold">비용</legend>
+          <div class="grid grid-cols-2 gap-3 sm:grid-cols-3">
+            ${f('adCost', '광고비', 'won', '쿠팡애즈 등 · VAT 포함')}
+            ${f('cs', 'CS 차감액', 'won', '발생한 금액만')}
+          </div>
+        </fieldset>
+        ${idp !== 'q-' ? html`
+          <fieldset class="flex flex-col gap-3">
+            <legend class="mb-2 text-sm font-semibold">쿠팡 연결 · 적용 기간</legend>
+            <div class="grid grid-cols-2 gap-3 sm:grid-cols-3">
+              <div class="col-span-2 sm:col-span-1"><${TextField} id=${idp + 'oid'} label="쿠팡 옵션 ID" value=${opt.optionId} placeholder="예: 96144727971"
+                hint="여러 개면 쉼표로 구분" onChange=${(v) => set({ optionId: v })} /></div>
+              <${TextField} id=${idp + 'pf'} type="date" label="적용 시작일" value=${opt.periodFrom} onChange=${(v) => set({ periodFrom: v })} />
+              <${TextField} id=${idp + 'pt'} type="date" label="적용 종료일" value=${opt.periodTo} onChange=${(v) => set({ periodTo: v })} />
+            </div>
+            <p class="text-xs text-muted text-pretty">가격을 바꾼 날 기준으로 기간을 넣으면, 월별 분석에서 그 달에 해당하는 매입원가와 쿠폰 설정을 씁니다. 기간이 없으면 총판매개수 비율로 섞어 씁니다.</p>
+          </fieldset>` : null}
+      </div>
+
+      <div class="flex flex-col gap-4 min-w-0">
+        <section class="rounded-lg bg-soft p-4" aria-label="쿠팡 가격">
+          <h3 class="mb-1 text-xs font-medium text-muted">쿠팡 등록 가격</h3>
+          <dl class="divide-y divide-line">
+            <${Line} label="쿠팡 정상가" value=${won(c.listPrice)} sub=${'할인율 ' + pct(c.finalDiscount)} />
+            <${Line} label="쿠팡 판매가" value=${won(c.salePrice)} />
+            <${Line} label="즉시할인 쿠폰" value=${minus(c.instantCouponAmt)} />
+            <${Line} label="다운로드 쿠폰" value=${minus(c.downloadCouponAmt)} />
+            <${Line} label="최종 결제금액" value=${won(c.pay)} strong />
+          </dl>
+        </section>
+        <section class="rounded-lg bg-soft p-4" aria-label="수익">
+          <h3 class="mb-1 text-xs font-medium text-muted">개당 · 전체 수익</h3>
+          <dl class="divide-y divide-line">
+            <${Line} label="개당 마진" value=${html`<span class=${tone(c.margin)}>${won(c.margin)}</span>`} sub=${pct(c.marginRate)} />
+            <${Line} label="END ROAS" value=${c.endRoas == null ? '산출불가' : pct(c.endRoas, 0)} sub="광고 손익분기" />
+            <${Line} label="수익" value=${won(c.revenue)} sub=${c.realSales == null ? '' : '실판매 ' + cnt(c.realSales)} />
+            <${Line} label="광고비" value=${minus(c.adCost)} />
+            <${Line} label="체험단 비용" value=${minus(c.trialCost)} />
+            <${Line} label="CS" value=${minus(c.cs)} />
+            <${Line} label="최종 순수익" value=${html`<span class=${tone(c.finalNet)}>${c.finalNet == null ? '수량 확인' : won(c.finalNet)}</span>`} strong />
+          </dl>
+        </section>
+      </div>
+    </div>`;
+}
+
+// ───────────── 대화상자 ─────────────
+function Modal({ open, onClose, labelledBy, role = 'dialog', children, wide }) {
+  const ref = useRef(null);
+  useEffect(() => {
+    const d = ref.current; if (!d) return;
+    if (open && !d.open) d.showModal();
+    if (!open && d.open) d.close();
+  }, [open]);
+  return html`
+    <dialog ref=${ref} role=${role} aria-labelledby=${labelledBy} onClose=${onClose}
+      onClick=${(e) => { if (e.target === ref.current) onClose(); }}
+      class=${'z-dialog m-auto w-[calc(100%-2rem)] max-h-[calc(100dvh-2rem)] overflow-y-auto rounded-xl border border-line bg-surface p-0 shadow-xl ' + (wide ? 'max-w-4xl' : 'max-w-md')}>
+      ${open ? children : null}
+    </dialog>`;
+}
+
+function Confirm({ state, onClose }) {
+  return html`
+    <${Modal} open=${!!state} onClose=${onClose} role="alertdialog" labelledBy="confirm-title">
+      ${state && html`
+        <div class="flex flex-col gap-4 p-5">
+          <h2 id="confirm-title" class="text-base font-semibold text-balance">${state.title}</h2>
+          <p class="text-sm text-muted text-pretty">${state.body}</p>
+          <div class="flex justify-end gap-2">
+            <button type="button" class="rounded-md border border-line px-3 py-2 text-sm hover:bg-soft" onClick=${onClose}>취소</button>
+            <button type="button" class="rounded-md bg-neg px-3 py-2 text-sm font-medium text-white hover:bg-neg/90"
+              onClick=${() => { state.onConfirm(); onClose(); }}>${state.action}</button>
+          </div>
+        </div>`}
+    </${Modal}>`;
+}
+
+// ───────────── 요약 · 상품 표 ─────────────
+function Summary({ t }) {
+  const items = [
+    ['실 매출', won(t.realGross), '실판매 × 결제금액'],
+    ['총 매출', won(t.gross), '체험단 가구매 포함'],
+    ['발주비용', won(t.order), '매입원가 × 실판매'],
+    ['광고비', won(t.ad), '직접 입력 · VAT 포함'],
+    ['체험단 비용', won(t.trialCost), cnt(t.trial) + ' · 가구매 ' + won(t.fakeBuy)],
+    ['판매개수', cnt(t.realSales), '총 ' + cnt(t.total)],
+  ];
+  return html`
+    <section aria-label="전체 합계" class="grid gap-3 lg:grid-cols-[minmax(0,16rem)_minmax(0,1fr)]">
+      <div class="flex flex-col justify-between gap-2 rounded-xl bg-surface p-4 border border-line">
+        <span class="text-sm text-muted">최종 순수익</span>
+        <span class=${'text-3xl font-bold tabular-nums ' + tone(t.finalNet)}>${won(t.finalNet)}</span>
+        <span class="text-xs text-muted">수익 ${won(t.revenue)} − 광고비 − 체험단 − CS</span>
+        ${t.errors ? html`<span class="text-xs font-medium text-warn">수량 확인이 필요한 규격 ${t.errors}개는 합계에서 빠졌습니다</span>` : null}
+      </div>
+      <dl class="grid grid-cols-2 gap-px overflow-hidden rounded-xl border border-line bg-line sm:grid-cols-3">
+        ${items.map(([k, v, s]) => html`
+          <div key=${k} class="flex flex-col gap-0.5 bg-surface p-3 min-w-0">
+            <dt class="text-xs text-muted">${k}</dt>
+            <dd class="text-base font-semibold tabular-nums truncate">${v}</dd>
+            <dd class="text-xs text-muted truncate">${s}</dd>
+          </div>`)}
+      </dl>
+    </section>`;
+}
+
+function ProductCard({ p, settings, onRename, onEdit, onAdd, onDelete }) {
+  const t = calcTotals(p.options, settings);
+  return html`
+    <section class="rounded-xl border border-line bg-surface">
+      <header class="flex flex-wrap items-center gap-x-4 gap-y-2 border-b border-line px-4 py-3">
+        <input aria-label="상품명" class="min-w-0 flex-1 basis-64 bg-transparent text-base font-semibold outline-none rounded px-1 -mx-1 hover:bg-soft focus:bg-soft"
+          value=${p.name} onChange=${(e) => onRename(e.target.value)} />
+        <span class="text-sm tabular-nums">순수익 <b class=${tone(t.finalNet)}>${won(t.finalNet)}</b></span>
+        <div class="flex gap-2">
+          <button type="button" class="rounded-md border border-line px-2.5 py-1.5 text-sm hover:bg-soft" onClick=${onAdd}>규격 추가</button>
+          <button type="button" class="rounded-md px-2.5 py-1.5 text-sm text-muted hover:bg-soft hover:text-neg" onClick=${onDelete}>상품 삭제</button>
+        </div>
+      </header>
+      <div class="relative overflow-x-auto">
+        <table class="w-full min-w-[760px] text-sm tabular-nums">
+          <thead class="text-xs text-muted">
+            <tr class="text-right [&>th]:px-3 [&>th]:py-2 [&>th]:font-medium">
+              <th class="text-left">규격</th><th>결제금액</th><th>정상가 · 할인율</th><th>개당 마진</th><th>END ROAS</th>
+              <th>판매 · 체험단</th><th>광고비</th><th>최종 순수익</th><th class="w-px"><span class="sr-only">편집</span></th>
+            </tr>
+          </thead>
+          <tbody>
+            ${p.options.map((o) => {
+              const c = calcRow(o, settings);
+              return html`
+                <tr key=${o.id} class="cursor-pointer border-t border-line text-right hover:bg-soft [&>td]:px-3 [&>td]:py-2.5" onClick=${() => onEdit(o.id)}>
+                  <td class="text-left font-medium">${o.option || html`<span class="text-muted">규격 없음</span>`}${o.periodFrom || o.periodTo
+                    ? html`<div class="text-xs font-normal text-muted">${o.periodFrom ? shortDate(o.periodFrom) : ''} ~ ${o.periodTo ? shortDate(o.periodTo) : ''}</div>` : null}</td>
+                  <td>${won(c.pay)}</td>
+                  <td><span>${wonShort(c.listPrice)}</span> <span class="text-muted">${pct(c.finalDiscount, 0)}</span></td>
+                  <td><span class=${tone(c.margin)}>${wonShort(c.margin)}</span> <span class="text-muted">${pct(c.marginRate)}</span></td>
+                  <td>${c.endRoas == null ? html`<span class="text-neg">산출불가</span>` : pct(c.endRoas, 0)}</td>
+                  <td>${c.qtyError ? html`<span class="rounded bg-warn/15 px-1.5 py-0.5 text-xs font-medium text-warn">수량 확인</span>`
+                    : html`${cnt(num(o.totalSales))} <span class="text-muted">· ${num(o.trialCount)}</span>`}</td>
+                  <td>${wonShort(c.adCost)}</td>
+                  <td class=${'font-semibold ' + tone(c.finalNet)}>${c.finalNet == null ? '–' : wonShort(c.finalNet)}</td>
+                  <td><button type="button" class="whitespace-nowrap rounded px-2 py-1 text-xs text-muted hover:bg-line hover:text-fg"
+                    onClick=${(e) => { e.stopPropagation(); onEdit(o.id); }}>편집</button></td>
+                </tr>`;
+            })}
+          </tbody>
+        </table>
+      </div>
+    </section>`;
+}
+
+// ───────────── 월별 분석 화면 ─────────────
+const monthLabel = (m) => `${m.slice(0, 4)}년 ${Number(m.slice(5))}월`;
+const shortDate = (d) => `${Number(d.slice(5, 7))}/${Number(d.slice(8))}`;
+const EMPTY_AN = { daily: {}, batches: [], coupons: [], inputs: {} };
+
+function TextField({ id, label, value, onChange, type = 'text', hint, placeholder }) {
+  return html`
+    <label for=${id} class="flex flex-col gap-1 min-w-0">
+      <span class="text-xs font-medium text-muted">${label}</span>
+      <input id=${id} type=${type} value=${value ?? ''} placeholder=${placeholder} autocomplete="off"
+        class="w-full min-w-0 rounded-md border border-line bg-surface px-2.5 py-2 text-sm tabular-nums outline-none focus:border-accent"
+        onChange=${(e) => onChange(e.target.value)} />
+      ${hint ? html`<span class="text-xs text-muted text-pretty">${hint}</span>` : null}
+    </label>`;
+}
+
+function Kpi({ label, value, sub, valueClass = '' }) {
+  return html`
+    <div class="flex flex-col gap-0.5 bg-surface p-3 min-w-0">
+      <dt class="text-xs text-muted">${label}</dt>
+      <dd class=${'text-base font-semibold tabular-nums truncate ' + valueClass}>${value}</dd>
+      ${sub ? html`<dd class="text-xs text-muted truncate">${sub}</dd>` : null}
+    </div>`;
+}
+
+function DailyChart({ month, days }) {
+  const [hover, setHover] = useState(null);
+  const end = Number(monthEnd(month).slice(8));
+  const byDate = Object.fromEntries(days.map((d) => [d.date, d]));
+  const series = Array.from({ length: end }, (_, i) => {
+    const date = `${month}-${pad2(i + 1)}`;
+    return { date, ...(byDate[date] || { revenue: 0, qty: 0, visitors: 0, orders: 0, views: 0, missing: true }) };
+  });
+  const max = Math.max(1, ...series.map((d) => d.revenue));
+  const min = Math.min(0, ...series.map((d) => d.revenue));
+  const posH = 140, negH = min < 0 ? Math.max(16, Math.round((140 * -min) / max)) : 0;
+  const h = hover != null ? series[hover] : null;
+  return html`
+    <section class="flex flex-col gap-3 rounded-xl border border-line bg-surface p-4" aria-label="일별 매출">
+      <div class="flex flex-wrap items-baseline justify-between gap-2">
+        <h3 class="text-sm font-semibold">일별 매출 <span class="font-normal text-muted">(판매가 기준, 주문일)</span></h3>
+        <p class="text-xs tabular-nums text-muted" aria-live="polite">
+          ${h ? html`<b class="text-fg">${Number(h.date.slice(5, 7))}월 ${Number(h.date.slice(8))}일</b> · 매출 ${won(h.revenue)} · 판매 ${cnt(h.qty)} · 방문자 ${h.visitors.toLocaleString('ko-KR')}${h.missing ? ' · 자료 없음' : ''}`
+            : '막대에 마우스를 올리면 날짜별 값이 보입니다'}
+        </p>
+      </div>
+      <div class="relative flex gap-2">
+        <div class="flex w-14 shrink-0 flex-col justify-between text-right text-[11px] tabular-nums text-muted" style=${{ height: posH + negH + 'px' }}>
+          <span>${(max / 10000).toLocaleString('ko-KR', { maximumFractionDigits: 0 })}만</span>
+          <span style=${{ marginBottom: negH + 'px' }}>0</span>
+        </div>
+        <div class="relative min-w-0 flex-1">
+          <div class="pointer-events-none absolute inset-x-0 top-0 border-t border-dashed border-line"></div>
+          <div class="pointer-events-none absolute inset-x-0 border-t border-line" style=${{ top: posH + 'px' }}></div>
+          <div class="flex" style=${{ height: posH + negH + 'px' }} onMouseLeave=${() => setHover(null)}>
+            ${series.map((d, i) => html`
+              <div key=${d.date} class="flex h-full min-w-0 flex-1 cursor-default flex-col px-px outline-none" tabindex="0"
+                aria-label=${`${shortDate(d.date)} 매출 ${won(d.revenue)}`}
+                onMouseEnter=${() => setHover(i)} onFocus=${() => setHover(i)} onBlur=${() => setHover(null)}>
+                <div class="flex flex-col justify-end" style=${{ height: posH + 'px' }}>
+                  ${d.revenue > 0 ? html`<div class=${'rounded-t ' + (hover === i ? 'bg-fg' : 'bg-accent')} style=${{ height: Math.max(2, (d.revenue / max) * posH) + 'px' }}></div>` : null}
+                </div>
+                <div style=${{ height: negH + 'px' }}>
+                  ${d.revenue < 0 ? html`<div class="rounded-b bg-neg" style=${{ height: Math.max(2, (-d.revenue / -min) * negH) + 'px' }}></div>` : null}
+                </div>
+              </div>`)}
+          </div>
+          <div class="mt-1 flex text-[11px] tabular-nums text-muted">
+            ${series.map((d, i) => html`<span key=${d.date} class="min-w-0 flex-1 text-center">${i === 0 || (i + 1) % 5 === 0 ? i + 1 : ''}</span>`)}
+          </div>
+        </div>
+      </div>
+    </section>`;
+}
+
+function ProductCostDialog({ open, onClose, month, product, an, setAn, onDeleteCoupon }) {
+  const [kind, setKind] = useState('instant');
+  const [name, setName] = useState('');
+  if (!product) return html`<${Modal} open=${false} onClose=${onClose} labelledBy="pc-title" />`;
+  const pid = product.productId;
+  const inp = an.inputs?.[month]?.[pid] || {};
+  const setInp = (patch) => setAn((a) => ({ ...a, inputs: { ...a.inputs, [month]: { ...(a.inputs?.[month] || {}), [pid]: { ...(a.inputs?.[month]?.[pid] || {}), ...patch } } } }));
+  const coupons = (an.coupons || []).filter((c) => c.productId === pid);
+  const setCum = (cid, v) => setAn((a) => ({ ...a, coupons: a.coupons.map((c) => (c.id === cid ? { ...c, cum: { ...c.cum, [month]: v } } : c)) }));
+  const addCoupon = () => {
+    if (!name.trim()) return;
+    setAn((a) => ({ ...a, coupons: [...(a.coupons || []), { id: uid(), name: name.trim(), kind, productId: pid, cum: {} }] }));
+    setName('');
+  };
+  return html`
+    <${Modal} open=${open} onClose=${onClose} labelledBy="pc-title" wide>
+      <div class="flex flex-col">
+        <div class="sticky top-0 z-header flex flex-wrap items-end gap-3 border-b border-line bg-surface px-5 py-4">
+          <div class="flex min-w-0 flex-1 flex-col gap-1">
+            <p class="text-xs font-medium text-muted">${monthLabel(month)} · 쿠폰과 비용</p>
+            <h2 id="pc-title" class="truncate text-lg font-semibold">${product.name}</h2>
+          </div>
+          <button type="button" class="rounded-md bg-accent px-3 py-2 text-sm font-medium text-accent-fg" onClick=${onClose}>완료</button>
+        </div>
+        <div class="grid gap-6 p-5 md:grid-cols-2">
+          <fieldset class="flex flex-col gap-3 min-w-0">
+            <legend class="mb-1 text-sm font-semibold">쿠폰 사용 금액</legend>
+            <p class="text-xs text-muted text-pretty">쿠팡 윙 프로모션 › 할인쿠폰 관리의 <b>사용 금액</b>을 그대로 넣으세요. 기간 누적 금액이라 지난달까지 넣은 금액을 빼고 이번 달 사용분을 계산합니다. 월초에 지난달 금액을 넣는 것이 가장 정확합니다.</p>
+            ${coupons.length ? coupons.map((c) => {
+              const used = couponUsage(c, month);
+              const prevKey = Object.keys(c.cum || {}).filter((k) => k < month && c.cum[k] !== '' && c.cum[k] != null).sort().pop();
+              return html`
+                <div key=${c.id} class="flex flex-col gap-2 rounded-lg bg-soft p-3">
+                  <div class="flex items-center gap-2">
+                    <span class=${'rounded px-1.5 py-0.5 text-xs font-medium ' + (c.kind === 'download' ? 'bg-pos/15 text-pos' : 'bg-accent/15 text-accent')}>${c.kind === 'download' ? '다운로드' : '즉시할인'}</span>
+                    <span class="min-w-0 flex-1 truncate text-sm font-medium">${c.name}</span>
+                    <button type="button" class="rounded px-2 py-1 text-xs text-muted hover:bg-line hover:text-neg" onClick=${() => onDeleteCoupon(c)}>삭제</button>
+                  </div>
+                  <${NumField} id=${'cum-' + c.id} label=${monthLabel(month) + ' 기준 누적 사용 금액'} kind="won" value=${c.cum?.[month] ?? ''} onChange=${(v) => setCum(c.id, v)} />
+                  <p class="text-xs tabular-nums text-muted">${used == null ? '입력하지 않으면 이 쿠폰은 이번 달 계산에서 빠집니다'
+                    : `이번 달 사용 ${won(used)}` + (prevKey ? ` (= 누적 − ${monthLabel(prevKey)} ${won(num(c.cum[prevKey]))})` : '')}</p>
+                </div>`;
+            }) : html`<p class="rounded-lg border border-dashed border-line p-3 text-sm text-muted">등록한 쿠폰이 없습니다. 쿠폰을 넣지 않으면 계산기 쿠폰 설정 × 판매량으로 예상 금액을 씁니다.</p>`}
+            <div class="flex flex-wrap items-end gap-2">
+              <label for="cp-kind" class="flex flex-col gap-1">
+                <span class="text-xs font-medium text-muted">종류</span>
+                <select id="cp-kind" value=${kind} onChange=${(e) => setKind(e.target.value)} class="rounded-md border border-line bg-surface px-2 py-2 text-sm">
+                  <option value="instant">즉시할인</option><option value="download">다운로드</option>
+                </select>
+              </label>
+              <div class="min-w-0 flex-1 basis-40"><${TextField} id="cp-name" label="쿠폰 이름" value=${name} onChange=${setName} placeholder="예: 감홍사과 즉시할인쿠폰" /></div>
+              <button type="button" class="rounded-md border border-line px-3 py-2 text-sm hover:bg-soft disabled:opacity-50" disabled=${!name.trim()} onClick=${addCoupon}>쿠폰 추가</button>
+            </div>
+          </fieldset>
+          <fieldset class="flex flex-col gap-3 min-w-0">
+            <legend class="mb-1 text-sm font-semibold">${monthLabel(month)} 비용</legend>
+            <div class="grid grid-cols-2 gap-3">
+              <${NumField} id="pc-ad" label="광고비(쿠팡애즈)" kind="won" hint="VAT 포함" value=${inp.ad ?? ''} onChange=${(v) => setInp({ ad: v })} />
+              <${NumField} id="pc-cs" label="CS 차감액" kind="won" value=${inp.cs ?? ''} onChange=${(v) => setInp({ cs: v })} />
+              <${NumField} id="pc-tc" label="체험단개수" kind="int" hint="판매량에 포함된 가구매" value=${inp.trialCount ?? ''} onChange=${(v) => setInp({ trialCount: v })} />
+              <${NumField} id="pc-tp" label="체험단 단가" kind="won" hint="1건당 실제 지출" value=${inp.trialPrice ?? ''} onChange=${(v) => setInp({ trialPrice: v })} />
+            </div>
+            <p class="text-xs text-muted text-pretty">체험단은 빈박스 발송이라 매입원가를 빼지 않고, 가구매 결제액 환급과 체험단 단가를 비용으로 잡습니다.</p>
+          </fieldset>
+        </div>
+      </div>
+    </${Modal}>`;
+}
+
+// 규격(kg) 오름차순. 무게가 없는 규격은 뒤로 보내고 이름순
+const bySpec = (label) => (a, b) => {
+  const ka = specKg(label(a)), kb = specKg(label(b));
+  if (ka !== kb) return ka == null ? 1 : kb == null ? -1 : ka - kb;
+  return String(label(a)).localeCompare(String(label(b)), 'ko');
+};
+
+function LinkDialog({ open, onClose, items, calc, onLink }) {
+  const groups = useMemo(() => calcGroups(calc), [calc]);
+  const titles = useMemo(() => [...new Set(calc.products.map((p) => p.name))], [calc]);
+  const linkOf = (optionId) => groups.find((g) => g.blocks.some((b) => idsOf(b).includes(optionId)));
+  const suggestions = useMemo(() => suggestLinks(items.filter((it) => !linkOf(it.optionId)), calc).filter((x) => x.exact), [items, calc]);
+  // 쿠팡 등록상품 단위로 묶고 판매량 순으로 정렬
+  const products = useMemo(() => {
+    const map = new Map();
+    for (const it of items) {
+      if (!map.has(it.productId)) map.set(it.productId, { productId: it.productId, name: it.productName, qty: 0, options: [] });
+      const p = map.get(it.productId); p.qty += it.qty; p.options.push(it);
+    }
+    return [...map.values()].sort((a, b) => b.qty - a.qty);
+  }, [items]);
+  const titleOf = (p) => p.options.map((o) => linkOf(o.optionId)?.name).find(Boolean) ?? titleFor(p.name, calc)?.name ?? '';
+  const setTitle = (p, title) => onLink(p.options.map((o) => ({ optionId: o.optionId, key: title ? linkKeyIn(title, o.optionName, groups) : '' })));
+  return html`
+    <${Modal} open=${open} onClose=${onClose} labelledBy="link-title" wide>
+      <div class="flex flex-col">
+        <div class="sticky top-0 z-header flex flex-wrap items-end gap-3 border-b border-line bg-surface px-5 py-4">
+          <div class="flex min-w-0 flex-1 flex-col gap-1">
+            <h2 id="link-title" class="text-lg font-semibold">쿠팡 옵션과 계산기 규격 연결</h2>
+            <p class="text-xs text-muted text-pretty">쿠팡 상품명과 <b>제목이 같은 계산기 상품</b>을 고른 뒤, 그 안에서 무게가 같은 규격에 옵션을 연결합니다. 같은 제목·규격의 가격 구간은 모두 함께 연결됩니다.</p>
+          </div>
+          ${suggestions.length ? html`<button type="button" class="rounded-md border border-line px-3 py-2 text-sm hover:bg-soft" onClick=${() => onLink(suggestions)}>제목 같은 옵션 ${suggestions.length}개 모두 연결</button>` : null}
+          <button type="button" class="rounded-md bg-accent px-3 py-2 text-sm font-medium text-accent-fg" onClick=${onClose}>완료</button>
+        </div>
+        <div class="flex flex-col gap-4 p-5">
+          ${products.map((p) => {
+            const title = titleOf(p);
+            const linkedTitle = p.options.some((o) => linkOf(o.optionId));
+            const exact = title && sameTitle(title, p.name);
+            const specs = groups.filter((g) => g.name === title).sort(bySpec((g) => g.option));
+            return html`
+              <section key=${p.productId} class="rounded-lg border border-line">
+                <div class="flex flex-col gap-2 border-b border-line bg-soft px-4 py-3">
+                  <div class="flex flex-wrap items-baseline gap-x-2">
+                    <h3 class="min-w-0 flex-1 truncate text-sm font-semibold">${p.name}</h3>
+                    <span class="text-xs tabular-nums text-muted">등록상품 ${p.productId} · 판매 ${cnt(p.qty)}</span>
+                  </div>
+                  <label class="flex flex-wrap items-center gap-2 text-xs text-muted" for=${'lt-' + p.productId}>
+                    <span>계산기 상품</span>
+                    <select id=${'lt-' + p.productId} value=${title} onChange=${(e) => setTitle(p, e.target.value)}
+                      class=${'min-w-0 max-w-full flex-1 rounded-md border bg-surface px-2 py-1.5 text-sm text-fg ' + (linkedTitle ? 'border-line' : 'border-warn')}>
+                      <option value="">연결 안 함</option>
+                      ${titles.map((n) => html`<option key=${n} value=${n}>${n}</option>`)}
+                    </select>
+                    ${title ? html`<span class=${exact ? 'text-pos' : 'text-warn'}>${exact ? '제목 일치' : '비슷한 제목'}</span>` : null}
+                    ${title && !linkedTitle ? html`<button type="button" class="rounded-md bg-accent px-2.5 py-1 text-xs font-medium text-accent-fg" onClick=${() => setTitle(p, title)}>이 제목으로 연결</button>` : null}
+                  </label>
+                </div>
+                <div class="relative overflow-x-auto">
+                  <table class="w-full min-w-[560px] text-sm">
+                    <tbody>
+                      ${p.options.slice().sort(bySpec((o) => o.optionName)).map((o) => {
+                        const cur = linkOf(o.optionId);
+                        return html`
+                          <tr key=${o.optionId} class="border-t border-line first:border-t-0 [&>td]:px-4 [&>td]:py-2">
+                            <td><div class="truncate">${o.optionName.split(', ').slice(1).join(', ') || o.optionName}</div><div class="text-xs tabular-nums text-muted">옵션 ID ${o.optionId}</div></td>
+                            <td class="w-20 text-right tabular-nums">${cnt(o.qty)}</td>
+                            <td class="w-56">
+                              <select aria-label=${o.optionName + ' 연결할 규격'} value=${cur?.key || ''} disabled=${!title}
+                                onChange=${(e) => onLink([{ optionId: o.optionId, key: e.target.value }])}
+                                class=${'w-full rounded-md border bg-surface px-2 py-1.5 text-sm disabled:opacity-50 ' + (cur || !o.qty ? 'border-line' : 'border-warn')}>
+                                <option value="">연결 안 함</option>
+                                ${specs.map((g) => html`<option key=${g.key} value=${g.key}>${g.option}${g.blocks.length > 1 ? ` (${g.blocks.length}구간)` : ''}</option>`)}
+                              </select>
+                            </td>
+                          </tr>`;
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </section>`;
+          })}
+        </div>
+      </div>
+    </${Modal}>`;
+}
+
+function AnalysisPanel({ an, setAn, calc, onLink, setConfirm, setNotice }) {
+  const [pending, setPending] = useState(null);
+  const [month, setMonth] = useState(null);
+  const [expanded, setExpanded] = useState({});
+  const [costFor, setCostFor] = useState(null);
+  const [linkOpen, setLinkOpen] = useState(false);
+  const [showIdle, setShowIdle] = useState(false);
+  const fileRef = useRef(null);
+
+  const months = useMemo(() => buildMonths(an), [an]);
+  const monthKeys = Object.keys(months).sort();
+  const overview = useMemo(() => monthKeys.map((m) => analyzeMonth(an, calc, months, m)), [an, calc, months]);
+  const cur = month && months[month] ? month : monthKeys[monthKeys.length - 1];
+  const A = overview.find((o) => o.month === cur);
+  const allItems = useMemo(() => {
+    const map = new Map();
+    for (const b of an.batches || []) for (const r of b.rows) {
+      const it = map.get(r.optionId) || { ...r, qty: 0 };
+      it.qty += r.qty; map.set(r.optionId, it);
+    }
+    return [...map.values()];
+  }, [an]);
+  const linkedIds = new Set(calc.products.flatMap((p) => p.options.flatMap(idsOf)));
+  const unlinked = allItems.filter((it) => it.qty > 0 && !linkedIds.has(it.optionId));
+
+  const onFiles = async (e) => {
+    const files = [...(e.target.files || [])]; e.target.value = '';
+    if (!files.length) return;
+    const next = { daily: null, items: null, names: [], errors: [] };
+    for (const f of files) {
+      try {
+        const wb = XLSX.read(await f.arrayBuffer(), { type: 'array', cellDates: true });
+        const parsed = parseInsightsSheet(XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header: 1, raw: true, defval: '' }));
+        if (!parsed) next.errors.push(`${f.name}: 판매분석 엑셀 형식이 아닙니다`);
+        else { next[parsed.kind] = { ...parsed, fileName: f.name }; next.names.push(f.name); }
+      } catch (err) { next.errors.push(`${f.name}: 파일을 읽지 못했습니다`); }
+    }
+    next.from = next.daily?.from || ''; next.to = next.daily?.to || '';
+    setPending(next);
+  };
+
+  const pendingCheck = (() => {
+    if (!pending?.items || !pending.from || !pending.to) return null;
+    const dailySrc = { ...an.daily, ...Object.fromEntries((pending.daily?.rows || []).map((r) => [r.date, r])) };
+    let q = 0, r = 0, covered = 0;
+    for (let d = pending.from; d <= pending.to; d = addDays(d, 1)) if (dailySrc[d]) { covered++; q += dailySrc[d].qty; r += dailySrc[d].revenue; }
+    const iq = pending.items.rows.reduce((a, x) => a + x.qty, 0), ir = pending.items.rows.reduce((a, x) => a + x.revenue, 0);
+    return { full: covered === daysBetween(pending.from, pending.to), q, r, iq, ir, ok: covered > 0 && Math.round(q) === Math.round(iq) && Math.round(r) === Math.round(ir) };
+  })();
+
+  const applyPending = () => {
+    const p = pending;
+    if (p.items && !(p.from && p.to && p.from <= p.to)) return;
+    const replaced = p.items ? (an.batches || []).filter((b) => !(b.to < p.from || b.from > p.to)).length : 0;
+    setAn((a) => {
+      const daily = { ...a.daily };
+      for (const r of p.daily?.rows || []) { const { date, ...v } = r; daily[date] = v; }
+      let batches = a.batches || [];
+      if (p.items) {
+        const keep = batches.filter((b) => b.to < p.from || b.from > p.to);
+        batches = [...keep, { id: uid(), from: p.from, to: p.to, fileName: p.items.fileName, rows: p.items.rows }].sort((x, y) => (x.from < y.from ? -1 : 1));
+      }
+      return { ...a, daily, batches };
+    });
+    setNotice({ kind: 'ok', text: `판매분석 자료를 추가했습니다${p.items ? ` (상품별 ${shortDate(p.from)}~${shortDate(p.to)})` : ''}.` + (replaced ? ` 기간이 겹치는 상품별 자료 ${replaced}개는 새 자료로 바꿨습니다.` : '') });
+    setPending(null); setMonth(null);
+  };
+
+  const removeBatch = (b) => setConfirm({ title: '상품별 자료를 삭제할까요?', body: `${b.fileName || '상품별 자료'} (${b.from} ~ ${b.to})가 분석에서 빠집니다. 입력한 쿠폰과 비용은 남습니다.`, action: '삭제',
+    onConfirm: () => setAn((a) => ({ ...a, batches: a.batches.filter((x) => x.id !== b.id) })) });
+  const dailyDates = Object.keys(an.daily || {}).sort();
+  const t = A?.totals;
+  const sold = A ? A.products.filter((p) => p.qty || p.ad || p.cs) : [];
+  const idle = A ? A.products.filter((p) => !(p.qty || p.ad || p.cs)) : [];
+  const costProduct = costFor && A?.products.find((p) => p.productId === costFor);
+
+  return html`
+    <div id="panel-analysis" role="tabpanel" aria-labelledby="tab-analysis" class="flex flex-col gap-4">
+      <section class="flex flex-col gap-3 rounded-xl border border-line bg-surface p-4" aria-label="판매분석 자료">
+        <div class="flex flex-wrap items-center gap-3">
+          <div class="min-w-0 flex-1 basis-64">
+            <h2 class="text-sm font-semibold">판매분석 자료</h2>
+            <p class="text-xs text-muted text-pretty">쿠팡 윙 비즈니스 인사이트 › 판매분석에서 <b>기간별</b> 엑셀과 <b>상품별</b> 엑셀을 같은 기간으로 받아 함께 올리세요. 주문일 기준으로 월별로 나눕니다.</p>
+          </div>
+          <input ref=${fileRef} id="insight-files" type="file" multiple accept=".xlsx,.xls" class="sr-only" onChange=${onFiles} />
+          <button type="button" class="rounded-md bg-accent px-3 py-2 text-sm font-medium text-accent-fg" onClick=${() => fileRef.current.click()}>판매분석 파일 올리기</button>
+        </div>
+        ${pending ? html`
+          <div class="flex flex-col gap-3 rounded-lg border border-accent/40 bg-accent/5 p-3">
+            <ul class="flex flex-col gap-1 text-sm">
+              ${pending.daily ? html`<li>기간별: <b>${pending.daily.fileName}</b> · ${pending.daily.from} ~ ${pending.daily.to} (${pending.daily.rows.length}일)</li>` : html`<li class="text-muted">기간별 파일 없음 · 여러 달에 걸친 상품별 자료는 일수 비율로 나눕니다</li>`}
+              ${pending.items ? html`<li>상품별: <b>${pending.items.fileName}</b> · 옵션 ${pending.items.rows.length}개 · 판매량 ${cnt(pending.items.rows.reduce((a, x) => a + x.qty, 0))}</li>` : null}
+              ${pending.errors.map((er) => html`<li key=${er} class="text-neg">${er}</li>`)}
+            </ul>
+            ${pending.items ? html`
+              <div class="flex flex-wrap items-end gap-3">
+                <div class="w-40"><${TextField} id="pd-from" type="date" label="상품별 자료 시작일" value=${pending.from} onChange=${(v) => setPending((p) => ({ ...p, from: v }))} /></div>
+                <div class="w-40"><${TextField} id="pd-to" type="date" label="상품별 자료 종료일" value=${pending.to} onChange=${(v) => setPending((p) => ({ ...p, to: v }))} /></div>
+                <p class="min-w-0 flex-1 basis-56 text-xs text-muted text-pretty">상품별 엑셀에는 날짜가 없어서, 받을 때 고른 기간을 넣어야 합니다.${pending.daily ? ' 기간별 파일의 기간으로 채웠습니다.' : ''}</p>
+              </div>
+              ${pendingCheck ? html`<p class=${'text-sm ' + (pendingCheck.ok ? 'text-pos' : 'text-warn')}>${pendingCheck.ok
+                ? `✓ 같은 기간의 기간별 합계와 일치합니다 (판매량 ${cnt(pendingCheck.q)}, 매출 ${won(pendingCheck.r)})`
+                : `기간별 합계와 다릅니다: 기간별 판매량 ${cnt(pendingCheck.q)} · 상품별 ${cnt(pendingCheck.iq)}. 두 파일의 기간이 같은지 확인하세요.`}</p>` : null}` : null}
+            <div class="flex justify-end gap-2">
+              <button type="button" class="rounded-md border border-line px-3 py-2 text-sm hover:bg-soft" onClick=${() => setPending(null)}>취소</button>
+              <button type="button" class="rounded-md bg-accent px-3 py-2 text-sm font-medium text-accent-fg disabled:opacity-50"
+                disabled=${!(pending.daily || pending.items) || (pending.items && !(pending.from && pending.to && pending.from <= pending.to))} onClick=${applyPending}>분석에 추가</button>
+            </div>
+          </div>` : null}
+        ${dailyDates.length || an.batches?.length ? html`
+          <div class="flex flex-wrap gap-2 text-xs">
+            ${dailyDates.length ? html`<span class="rounded-md bg-soft px-2 py-1 tabular-nums">기간별 ${dailyDates[0]} ~ ${dailyDates[dailyDates.length - 1]} · ${dailyDates.length}일</span>` : null}
+            ${(an.batches || []).map((b) => html`
+              <span key=${b.id} class="flex items-center gap-1 rounded-md bg-soft py-1 pl-2 pr-1 tabular-nums">상품별 ${b.from} ~ ${b.to}
+                <button type="button" aria-label=${`상품별 자료 ${b.from}~${b.to} 삭제`} class="rounded px-1 text-muted hover:bg-line hover:text-neg" onClick=${() => removeBatch(b)}>×</button></span>`)}
+          </div>` : null}
+      </section>
+
+      ${!monthKeys.length ? html`
+        <div class="flex flex-col items-center gap-3 rounded-xl border border-dashed border-line px-4 py-12 text-center">
+          <p class="max-w-md text-sm text-muted text-pretty">아직 판매분석 자료가 없습니다. 기간별·상품별 엑셀을 올리면 월별 판매량, 쿠폰, 순수익이 여기에 정리됩니다.</p>
+          <button type="button" class="rounded-md bg-accent px-3 py-2 text-sm font-medium text-accent-fg" onClick=${() => fileRef.current.click()}>판매분석 파일 올리기</button>
+        </div>` : html`
+        ${unlinked.length ? html`
+          <div class="flex flex-wrap items-center gap-3 rounded-lg border border-warn/40 bg-warn/10 px-4 py-3 text-sm">
+            <p class="min-w-0 flex-1 text-pretty">판매된 쿠팡 옵션 <b>${unlinked.length}개</b>가 계산기 규격과 연결되지 않아 매입원가를 모릅니다. 이 상품들은 순수익이 비어 있습니다.</p>
+            <button type="button" class="rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-accent-fg" onClick=${() => setLinkOpen(true)}>옵션 연결</button>
+          </div>` : html`<div class="flex justify-end"><button type="button" class="rounded-md px-2 py-1 text-xs text-muted hover:bg-soft hover:text-fg" onClick=${() => setLinkOpen(true)}>옵션 연결 관리</button></div>`}
+
+        <section class="rounded-xl border border-line bg-surface" aria-label="월별 요약">
+          <h2 class="border-b border-line px-4 py-3 text-sm font-semibold">월별 요약 <span class="font-normal text-muted">· 행을 누르면 그 달 상세</span></h2>
+          <div class="relative overflow-x-auto">
+            <table class="w-full min-w-[820px] text-sm tabular-nums whitespace-nowrap">
+              <thead class="text-xs text-muted"><tr class="text-right [&>th]:px-3 [&>th]:py-2 [&>th]:font-medium">
+                <th class="text-left">월</th><th>판매량</th><th>취소율</th><th>매출(판매가)</th><th>쿠폰</th><th>수수료</th><th>매입원가</th><th>광고·체험단·CS</th><th>순수익</th><th>전환율</th></tr></thead>
+              <tbody>
+                ${overview.map((o) => { const x = o.totals; return html`
+                  <tr key=${o.month} aria-selected=${o.month === cur} class=${'cursor-pointer border-t border-line text-right [&>td]:px-3 [&>td]:py-2.5 ' + (o.month === cur ? 'bg-soft font-medium' : 'hover:bg-soft')} onClick=${() => setMonth(o.month)}>
+                    <td class="text-left">${monthLabel(o.month)}${o.estimated ? html` <span class="rounded bg-warn/15 px-1 text-xs font-normal text-warn">배분 추정</span>` : null}</td>
+                    <td>${cnt(x.qty || x.dailyQty)}</td>
+                    <td>${x.grossQty ? pct(x.cancelQty / x.grossQty) : '–'}</td>
+                    <td>${wonShort(x.revenue || x.dailyRevenue)}</td>
+                    <td>${o.hasItems ? wonShort(x.coupon) : '–'}</td>
+                    <td>${o.hasItems ? wonShort(x.commission) : '–'}</td>
+                    <td>${o.hasItems ? wonShort(x.goods) : '–'}</td>
+                    <td>${o.hasItems ? wonShort(x.ad + x.trialCost + x.cs) : '–'}</td>
+                    <td class=${'font-semibold ' + (o.hasItems ? tone(x.net) : 'text-muted')}>${o.hasItems ? wonShort(x.net) + (x.netMissing ? '*' : '') : '상품별 없음'}</td>
+                    <td>${x.visitors ? pct(x.orders / Math.max(1, o.days.reduce((a, d) => a + d.views, 0)), 2) : '–'}</td>
+                  </tr>`; })}
+              </tbody>
+            </table>
+          </div>
+          ${overview.some((o) => o.totals.netMissing) ? html`<p class="border-t border-line px-4 py-2 text-xs text-muted">* 옵션 연결이 안 된 상품은 순수익 합계에서 빠졌습니다.</p>` : null}
+        </section>
+
+        ${A ? html`
+          <section class="flex flex-col gap-4" aria-label=${monthLabel(cur) + ' 상세'}>
+            <div class="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+              <h2 class="text-lg font-bold">${monthLabel(cur)}</h2>
+              ${A.estimated ? html`<p class="text-xs text-warn text-pretty">상품별 자료가 여러 달에 걸쳐 있어, 이 달 몫을 기간별 자료의 판매 비중으로 나눴습니다. 정확히 보려면 상품별 엑셀을 월 단위로 받아 올리세요.</p>` : null}
+            </div>
+            <dl class="grid grid-cols-2 gap-px overflow-hidden rounded-xl border border-line bg-line sm:grid-cols-3 lg:grid-cols-6">
+              <${Kpi} label="순수익" value=${A.hasItems ? won(t.net) : '–'} valueClass=${A.hasItems ? tone(t.net) : 'text-muted'} sub=${t.netMissing ? '연결 안 된 상품 제외' : '쿠폰·수수료·원가·비용 차감'} />
+              <${Kpi} label="매출 (판매가 기준)" value=${won(t.revenue || t.dailyRevenue)} sub="쿠폰 차감 전" />
+              <${Kpi} label="쿠폰" value=${A.hasItems ? won(t.coupon) : '–'} sub=${A.products.some((p) => p.couponSource === 'expected' && p.qty) ? '일부 예상치 포함' : '입력한 사용 금액'} />
+              <${Kpi} label="판매량" value=${cnt(t.qty || t.dailyQty)} sub=${t.grossQty ? `취소 ${cnt(t.cancelQty)} · ${pct(t.cancelQty / t.grossQty)}` : ''} />
+              <${Kpi} label="방문자" value=${t.visitors.toLocaleString('ko-KR') + '명'} sub=${`주문 ${t.orders.toLocaleString('ko-KR')}건`} />
+              <${Kpi} label="광고·체험단·CS" value=${A.hasItems ? won(t.ad + t.trialCost + t.cs) : '–'} sub=${`광고 ${wonShort(t.ad)}`} />
+            </dl>
+            ${A.days.length ? html`<${DailyChart} month=${cur} days=${A.days} />` : null}
+
+            ${A.hasItems ? html`
+              <section class="rounded-xl border border-line bg-surface" aria-label="상품별">
+                <h3 class="border-b border-line px-4 py-3 text-sm font-semibold">상품별 · ${sold.length}개 판매 <span class="font-normal text-muted">· 상품명을 누르면 옵션별로 펼쳐집니다</span></h3>
+                <div class="relative overflow-x-auto">
+                  <table class="w-full min-w-[980px] text-sm tabular-nums whitespace-nowrap">
+                    <thead class="text-xs text-muted"><tr class="text-right [&>th]:px-3 [&>th]:py-2 [&>th]:font-medium">
+                      <th class="text-left">상품</th><th>판매량</th><th>취소율</th><th>매출</th><th>쿠폰</th><th>수수료</th><th>매입원가</th><th>광고·체험단·CS</th><th>순수익</th><th class="w-px"><span class="sr-only">입력</span></th></tr></thead>
+                    <tbody>
+                      ${[...sold, ...(showIdle ? idle : [])].map((p) => html`
+                        <${React.Fragment} key=${p.productId}>
+                          <tr class=${'border-t border-line text-right [&>td]:px-3 [&>td]:py-2.5 ' + (p.qty ? '' : 'text-muted')}>
+                            <td class="max-w-[20rem] text-left">
+                              <button type="button" aria-expanded=${!!expanded[p.productId]} class="flex w-full min-w-0 items-center gap-1.5 text-left hover:text-accent"
+                                onClick=${() => setExpanded((e) => ({ ...e, [p.productId]: !e[p.productId] }))}>
+                                <span aria-hidden="true" class="text-xs text-muted">${expanded[p.productId] ? '▾' : '▸'}</span>
+                                <span class="truncate font-medium">${p.name}</span>
+                              </button>
+                            </td>
+                            <td>${cnt(p.qty)}${p.trialCount ? html`<div class="text-xs text-muted">체험단 ${p.trialCount}</div>` : null}</td>
+                            <td>${p.grossQty ? pct(p.cancelQty / p.grossQty) : '–'}</td>
+                            <td>${wonShort(p.revenue)}</td>
+                            <td>${p.coupon == null ? '–' : wonShort(p.coupon)}
+                              <div class=${'text-xs ' + (p.couponSource === 'entered' ? 'text-muted' : 'text-warn')}>${p.couponSource === 'entered' ? (p.expectedCoupon ? `예상 ${wonShort(p.expectedCoupon)}` : '입력') : p.couponSource === 'expected' ? '예상치' : '연결 필요'}</div></td>
+                            <td>${wonShort(p.commission)}</td>
+                            <td>${p.goods == null ? html`<span class="text-warn">연결 필요</span>` : wonShort(p.goods)}</td>
+                            <td>${wonShort(p.ad + p.trialCost + p.cs)}</td>
+                            <td class=${'font-semibold ' + tone(p.net)}>${p.net == null ? '–' : wonShort(p.net)}</td>
+                            <td><button type="button" class="whitespace-nowrap rounded-md border border-line px-2 py-1 text-xs hover:bg-soft" onClick=${() => setCostFor(p.productId)}>쿠폰·비용</button></td>
+                          </tr>
+                          ${expanded[p.productId] ? p.options.slice().sort((a, b) => b.qty - a.qty).map((o) => html`
+                            <tr key=${o.optionId} class="bg-soft/60 text-right text-xs [&>td]:px-3 [&>td]:py-2">
+                              <td class="max-w-[20rem] pl-8 text-left"><div class="truncate">${o.optionName.split(', ').slice(1).join(', ') || o.optionName}</div><div class="text-muted">옵션 ID ${o.optionId}</div></td>
+                              <td>${cnt(o.qty)}</td>
+                              <td>${o.grossQty ? pct(o.cancelQty / o.grossQty) : '–'}</td>
+                              <td>${wonShort(o.revenue)}<div class="text-muted">평균 ${o.qty ? wonShort(o.revenue / o.qty) : '–'}원</div></td>
+                              <td>${wonShort(o.couponShare)}</td>
+                              <td></td>
+                              <td>${o.unit ? html`${wonShort(o.unit.cost)}원/개<div class="text-muted">${o.unit.blocks > 1 ? `${o.unit.blocks}구간 ${o.unit.dated ? '기간' : '판매수'} 가중` : '1구간'}</div>` : html`<span class="text-warn">연결 안 됨</span>`}</td>
+                              <td colspan="3" class="text-left">${o.unit && o.qty && Math.abs(o.revenue / o.qty - o.unit.salePrice) >= 100
+                                ? html`<span class="text-muted">계산기 판매가 ${wonShort(o.unit.salePrice)}원과 ${wonShort(o.revenue / o.qty - o.unit.salePrice)}원 차이</span>` : null}</td>
+                            </tr>`) : null}
+                        </${React.Fragment}>`)}
+                    </tbody>
+                  </table>
+                </div>
+                ${idle.length ? html`<button type="button" class="w-full border-t border-line px-4 py-2 text-left text-xs text-muted hover:bg-soft" onClick=${() => setShowIdle((v) => !v)}>
+                  ${showIdle ? '판매 없는 상품 숨기기' : `이 달 판매가 없는 상품 ${idle.length}개 보기`}</button>` : null}
+              </section>` : html`<p class="rounded-xl border border-dashed border-line p-4 text-sm text-muted">이 달은 기간별 자료만 있습니다. 상품별 엑셀을 올리면 쿠폰과 순수익이 계산됩니다.</p>`}
+          </section>` : null}
+      `}
+
+      <${ProductCostDialog} open=${!!costProduct} onClose=${() => setCostFor(null)} month=${cur} product=${costProduct} an=${an} setAn=${setAn}
+        onDeleteCoupon=${(c) => setConfirm({ title: `"${c.name}" 쿠폰을 삭제할까요?`, body: '모든 달에 입력한 이 쿠폰의 누적 사용 금액이 함께 지워집니다.', action: '삭제',
+          onConfirm: () => setAn((a) => ({ ...a, coupons: a.coupons.filter((x) => x.id !== c.id) })) })} />
+      <${LinkDialog} open=${linkOpen} onClose=${() => setLinkOpen(false)} items=${allItems} calc=${calc} onLink=${onLink} />
+    </div>`;
+}
+
+// ───────────── 앱 ─────────────
+function App() {
+  const { data, setData, mode, saveState: calcSave } = useDoc(LS_KEY, EXAMPLE, migrate);
+  const { data: an, setData: setAn, saveState: anSave } = useDoc(LS_AN_KEY, EMPTY_AN, (d) => d && { ...EMPTY_AN, ...d });
+  const saveState = [calcSave, anSave].includes('error') ? 'error' : [calcSave, anSave].includes('saving') ? 'saving'
+    : [calcSave, anSave].includes('saved') ? 'saved' : 'idle';
+  const [tab, setTab] = useState('list');
+  const [channel, setChannel] = useState('coupang');
+  const [editing, setEditing] = useState(null); // {pid, oid}
+  const [confirm, setConfirm] = useState(null);
+  const [notice, setNotice] = useState(null); // {kind, text}
+  const [quick, setQuick] = useState(() => emptyOption({ option: '1kg', cost: 8000, targetPay: 14900, instantCoupon: 2000, targetDiscount: 0.55 }));
+  const backupRef = useRef(null);
+  const fileRef = useRef(null);
+  const [dark, setDark] = useState(() => {
+    const cur = document.documentElement.dataset.theme;
+    return cur ? cur === 'dark' : matchMedia('(prefers-color-scheme: dark)').matches;
+  });
+  const toggleTheme = () => {
+    const next = dark ? 'light' : 'dark';
+    setDark(!dark);
+    document.documentElement.dataset.theme = next;
+    try { localStorage.setItem(THEME_KEY, next); } catch (e) {}
+  };
+
+  if (!data || !an) return html`<p id="boot">저장된 계산을 불러오는 중…</p>`;
+  const chName = channel === 'toss' ? '토스' : '쿠팡';
+  const g = data[settingsKey(channel)] || DEFAULT_TOSS_SETTINGS;
+  const chProducts = data.products.filter((p) => channelOf(p) === channel);
+  const allRows = chProducts.flatMap((p) => p.options);
+  const feeMissing = g.feeRate === '' || g.feeRate == null;
+  const totals = calcTotals(allRows, g);
+
+  const update = (fn) => setData((d) => ({ ...fn(d), isExample: false }));
+  const setSettings = (patch) => update((d) => ({ ...d, [settingsKey(channel)]: { ...(d[settingsKey(channel)] || DEFAULT_TOSS_SETTINGS), ...patch } }));
+  const setProduct = (pid, fn) => update((d) => ({ ...d, products: d.products.map((p) => (p.id === pid ? fn(p) : p)) }));
+  const setOption = (pid, oid, patch) => setProduct(pid, (p) => ({ ...p, options: p.options.map((o) => (o.id === oid ? { ...o, ...patch } : o)) }));
+
+  // 쿠팡 옵션 ID를 계산기 규격 묶음(상품명 + 규격)의 모든 가격 구간에 연결
+  const onLink = (links) => update((d) => ({ ...d, products: d.products.map((p) => channelOf(p) !== 'coupang' ? p : ({ ...p, options: p.options.map((o) => {
+    const key = p.name + '\u0000' + o.option;
+    let ids = idsOf(o).filter((id) => !links.some((l) => l.optionId === id));
+    for (const l of links) if (l.key === key) ids.push(l.optionId);
+    return { ...o, optionId: ids.join(', ') };
+  }) })) }));
+
+  const addProduct = (seed) => {
+    const o = emptyOption(seed ? { ...seed, id: uid() } : {});
+    const p = { id: uid(), channel, name: '새 상품', options: [o] };
+    update((d) => ({ ...d, products: [...d.products, p] }));
+    setTab('list'); setEditing({ pid: p.id, oid: o.id });
+  };
+  const addOption = (pid) => {
+    const o = emptyOption();
+    setProduct(pid, (p) => ({ ...p, options: [...p.options, o] }));
+    setEditing({ pid, oid: o.id });
+  };
+
+  const onImportFile = async (e) => {
+    const file = e.target.files?.[0]; e.target.value = '';
+    if (!file) return;
+    try {
+      const next = parseWorkbook(await file.arrayBuffer());
+      const n = next.products.reduce((s, p) => s + p.options.length, 0);
+      const ch = channel, key = settingsKey(ch);
+      const apply = () => {
+        setData((d) => ({ ...d, isExample: ch === 'coupang' ? false : d.isExample,
+          [key]: ch === 'coupang' || next.settingsFound ? next.settings : (d[key] || DEFAULT_TOSS_SETTINGS),
+          products: [...d.products.filter((p) => channelOf(p) !== ch), ...next.products.map((p) => ({ ...p, channel: ch }))] }));
+        setNotice({ kind: 'ok', text: `${file.name}에서 ${chName} 상품 ${next.products.length}개, 규격 ${n}개를 불러왔습니다.` });
+      };
+      if ((ch === 'coupang' && data.isExample) || !allRows.length) apply();
+      else setConfirm({ title: `${chName} 상품을 엑셀 내용으로 바꿀까요?`, body: `현재 ${chName} 상품 ${chProducts.length}개가 ${file.name}의 상품 ${next.products.length}개로 바뀝니다. 다른 판매처 상품은 그대로입니다. 되돌릴 수 없습니다.`, action: '바꾸기', onConfirm: apply });
+    } catch (err) { setNotice({ kind: 'err', text: '엑셀을 불러오지 못했습니다. ' + err.message }); }
+  };
+
+  const today = () => { const d = new Date(); return `${d.getFullYear()}${pad2(d.getMonth() + 1)}${pad2(d.getDate())}`; };
+  const onExport = () => saveFile(`fruit-margin_${channel}_${today()}.xlsx`, buildWorkbook({ settings: g, products: chProducts }),
+    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+
+  // 백업: 계산기와 분석 데이터를 JSON 파일 하나로 저장·복원 (파일 이름은 브라우저 호환을 위해 영문)
+  const onBackup = () => saveFile(`fruit-margin_backup_${today()}.json`,
+    JSON.stringify({ app: 'fruit-margin-calculator', version: 1, savedAt: new Date().toISOString(), calc: data, analysis: an }, null, 2), 'application/json');
+  const onRestore = async (e) => {
+    const file = e.target.files?.[0]; e.target.value = '';
+    if (!file) return;
+    try {
+      const json = JSON.parse(await file.text());
+      if (json.app !== 'fruit-margin-calculator' || !json.calc?.products) throw new Error('이 계산기의 백업 파일이 아닙니다.');
+      setConfirm({ title: '백업으로 되돌릴까요?', body: `${file.name}의 상품과 분석 자료로 지금 데이터가 모두 바뀝니다. 되돌릴 수 없습니다.`, action: '되돌리기',
+        onConfirm: () => { setData(migrate(json.calc)); setAn({ ...EMPTY_AN, ...(json.analysis || {}) }); setNotice({ kind: 'ok', text: `${file.name} 백업을 불러왔습니다.` }); } });
+    } catch (err) { setNotice({ kind: 'err', text: '백업을 불러오지 못했습니다. ' + (err.message || '') }); }
+  };
+
+  const ed = editing && data.products.find((p) => p.id === editing.pid);
+  const edOpt = ed && ed.options.find((o) => o.id === editing.oid);
+  const saveLabel = mode === 'account'
+    ? { idle: '내 계정에 저장', saving: '저장 중…', saved: '내 계정에 저장됨', error: '저장 실패 · 다시 수정하면 재시도' }[saveState]
+    : mode === 'browser' ? (saveState === 'error' ? '이 브라우저에 저장 실패' : '이 브라우저에만 저장') : '';
+
+  return html`
+    <div class="min-h-dvh">
+      <header class="wrap border-b border-line bg-surface">
+        <div class="mx-auto flex max-w-6xl flex-wrap items-center gap-x-6 gap-y-3 py-4">
+          <div class="flex min-w-0 flex-1 basis-60 flex-col">
+            <h1 class="text-lg font-bold text-balance">과일 마진 계산기</h1>
+            <p class="text-xs text-muted">쿠팡·토스 판매가 역산 · 개당 마진 · 월별 판매 분석 <span aria-live="polite" class=${saveState === 'error' ? 'text-neg' : ''}>· ${saveLabel}</span></p>
+          </div>
+          <div class="flex flex-wrap gap-2">
+            <button type="button" aria-label=${dark ? '라이트 모드로 전환' : '다크 모드로 전환'} title=${dark ? '라이트 모드' : '다크 모드'}
+              class="flex size-9 items-center justify-center rounded-md border border-line text-muted hover:bg-soft hover:text-fg" onClick=${toggleTheme}>
+              ${dark ? html`<${SunIcon} />` : html`<${MoonIcon} />`}
+            </button>
+            <input ref=${fileRef} id="import-file" type="file" accept=".xlsx,.xls" class="sr-only" onChange=${onImportFile} />
+            <button type="button" class="rounded-md border border-line px-3 py-2 text-sm hover:bg-soft" onClick=${() => fileRef.current.click()}>엑셀 불러오기</button>
+            <button type="button" class="rounded-md border border-line px-3 py-2 text-sm hover:bg-soft" onClick=${onExport}>엑셀 내보내기</button>
+            <button type="button" class="rounded-md bg-accent px-3 py-2 text-sm font-medium text-accent-fg hover:bg-accent/90" onClick=${() => addProduct()}>상품 추가</button>
+          </div>
+        </div>
+      </header>
+
+      <main class="wrap py-6">
+        <div class="mx-auto flex max-w-6xl flex-col gap-6">
+          ${data.isExample && tab === 'list' && channel === 'coupang' ? html`
+            <div class="flex flex-wrap items-center gap-3 rounded-lg border border-warn/40 bg-warn/10 px-4 py-3 text-sm">
+              <p class="min-w-0 flex-1 text-pretty"><b>예시 데이터입니다.</b> 쓰고 있는 계산기 엑셀을 불러오면 상품과 규격이 그대로 들어옵니다.</p>
+              <button type="button" class="rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-accent-fg" onClick=${() => fileRef.current.click()}>엑셀 불러오기</button>
+              <button type="button" class="rounded-md px-3 py-1.5 text-sm hover:bg-warn/15" onClick=${() => setData((d) => ({ ...d, isExample: false, products: d.products.filter((p) => channelOf(p) !== 'coupang') }))}>예시 지우기</button>
+            </div>` : null}
+          ${notice ? html`
+            <div role="status" class=${'flex items-start gap-3 rounded-lg px-4 py-3 text-sm ' + (notice.kind === 'err' ? 'bg-neg/10 text-neg' : 'bg-pos/10 text-pos')}>
+              <p class="min-w-0 flex-1 text-pretty">${notice.text}</p>
+              <button type="button" aria-label="알림 닫기" class="rounded px-1.5 hover:bg-line" onClick=${() => setNotice(null)}>×</button>
+            </div>` : null}
+
+          <div role="tablist" aria-label="보기" class="flex gap-1 border-b border-line">
+            ${[['list', '상품별 계산'], ['quick', '빠른 계산'], ['analysis', '월별 분석']].map(([k, label]) => html`
+              <button key=${k} role="tab" type="button" aria-selected=${tab === k} id=${'tab-' + k} aria-controls=${'panel-' + k}
+                class=${'-mb-px border-b-2 px-3 py-2 text-sm font-medium ' + (tab === k ? 'border-accent text-fg' : 'border-transparent text-muted hover:text-fg')}
+                onClick=${() => setTab(k)}>${label}</button>`)}
+          </div>
+
+          <div class="flex flex-wrap items-center gap-3">
+            <div role="tablist" aria-label="판매처" class="inline-flex rounded-lg border border-line bg-soft p-1">
+              ${CHANNELS.map(([k, label]) => html`
+                <button key=${k} role="tab" type="button" aria-selected=${channel === k} id=${'ch-' + k}
+                  class=${'rounded-md px-4 py-1.5 text-sm ' + (channel === k ? 'bg-surface font-semibold text-fg shadow-sm' : 'text-muted hover:text-fg')}
+                  onClick=${() => { setChannel(k); setEditing(null); }}>${label}</button>`)}
+            </div>
+            <span class="text-xs text-muted">${chName} 상품 ${chProducts.length}개 · 수수료율과 상품 목록은 판매처마다 따로 저장됩니다</span>
+          </div>
+
+          <section aria-label=${chName + ' 공통 설정'} class=${'flex flex-wrap items-end gap-4 rounded-xl border bg-surface px-4 py-3 ' + (feeMissing ? 'border-warn' : 'border-line')}>
+            <div class="w-40"><${NumField} id=${'g-fee-' + channel} label=${chName + ' 판매수수료율 (VAT 포함)'} kind="pct" value=${g.feeRate} onChange=${(v) => setSettings({ feeRate: v })} /></div>
+            <div class="w-32"><${NumField} id=${'g-unit-' + channel} label="가격 올림 단위" kind="won" value=${g.priceUnit} onChange=${(v) => setSettings({ priceUnit: v })} /></div>
+            <div class="w-32"><${NumField} id=${'g-vat-' + channel} label="광고비 VAT" kind="pct" value=${g.adVat} onChange=${(v) => setSettings({ adVat: v })} /></div>
+            <p class=${'min-w-0 flex-1 basis-60 text-xs text-pretty ' + (feeMissing ? 'font-medium text-warn' : 'text-muted')}>${feeMissing
+              ? `${chName} 판매수수료율을 입력하세요. 비어 있으면 수수료 0%로 계산돼 마진이 실제보다 크게 나옵니다.`
+              : '수수료율은 개당 마진과 체험단 가구매 수수료에 함께 적용됩니다. 체험단은 빈박스 발송이라 매입원가가 들어가지 않습니다.'}</p>
+          </section>
+
+          ${tab === 'analysis' ? (channel === 'coupang'
+            ? html`<${AnalysisPanel} an=${an} setAn=${setAn} calc=${{ ...data, settings: data.settings, products: chProducts }} onLink=${onLink} setConfirm=${setConfirm} setNotice=${setNotice} />`
+            : html`
+              <div id="panel-analysis" role="tabpanel" aria-labelledby="tab-analysis" class="flex flex-col items-center gap-2 rounded-xl border border-dashed border-line px-4 py-12 text-center">
+                <span class="rounded bg-soft px-2 py-0.5 text-xs font-medium text-muted">준비 중</span>
+                <h2 class="text-sm font-semibold">토스 판매 파일 분석</h2>
+                <p class="max-w-md text-sm text-muted text-pretty">토스에서 받는 판매 엑셀 양식이 아직 정해지지 않아 분석 기능은 비어 있습니다. 샘플 파일을 주시면 쿠팡과 같은 방식으로 월별 분석을 만들겠습니다.</p>
+              </div>`)
+          : tab === 'list' ? html`
+            <div id="panel-list" role="tabpanel" aria-labelledby="tab-list" class="flex flex-col gap-4">
+              <${Summary} t=${totals} />
+              ${chProducts.length ? chProducts.map((p) => html`
+                <${ProductCard} key=${p.id} p=${p} settings=${g}
+                  onRename=${(name) => setProduct(p.id, (x) => ({ ...x, name }))}
+                  onEdit=${(oid) => setEditing({ pid: p.id, oid })}
+                  onAdd=${() => addOption(p.id)}
+                  onDelete=${() => setConfirm({ title: `"${p.name}" 상품을 삭제할까요?`, body: `규격 ${p.options.length}개와 입력한 판매·비용 값이 함께 지워집니다.`, action: '삭제',
+                    onConfirm: () => update((d) => ({ ...d, products: d.products.filter((x) => x.id !== p.id) })) })} />`)
+              : html`
+                <div class="flex flex-col items-center gap-3 rounded-xl border border-dashed border-line px-4 py-12 text-center">
+                  <p class="text-sm text-muted">아직 ${chName} 상품이 없습니다. 계산기 엑셀을 불러오거나 상품을 직접 추가하세요.</p>
+                  <button type="button" class="rounded-md bg-accent px-3 py-2 text-sm font-medium text-accent-fg" onClick=${() => fileRef.current.click()}>엑셀 불러오기</button>
+                </div>`}
+            </div>` : html`
+            <div id="panel-quick" role="tabpanel" aria-labelledby="tab-quick" class="flex flex-col gap-4 rounded-xl border border-line bg-surface p-4">
+              <p class="text-sm text-muted text-pretty">저장하지 않고 가격만 바로 맞춰 보는 계산기입니다. 마음에 들면 상품으로 추가하세요.</p>
+              <${OptionForm} opt=${quick} set=${(patch) => setQuick((q) => ({ ...q, ...patch }))} settings=${g} idp="q-" />
+              <div class="flex justify-end">
+                <button type="button" class="rounded-md bg-accent px-3 py-2 text-sm font-medium text-accent-fg" onClick=${() => addProduct(quick)}>이 가격으로 상품 추가</button>
+              </div>
+            </div>`}
+
+          <details class="rounded-xl border border-line bg-surface px-4 py-3 text-sm">
+            <summary class="cursor-pointer font-medium">계산 방식</summary>
+            <ul class="mt-3 flex list-disc flex-col gap-1.5 pl-5 text-muted text-pretty">
+              <li>쿠팡 판매가 = 목표 결제금액 + 즉시할인 쿠폰 + 다운로드 쿠폰을 가격 단위로 올림. 쿠폰은 모두 정액입니다.</li>
+              <li>최종 결제금액 = 판매가 − 즉시할인 쿠폰 − 다운로드 쿠폰. 다운로드 쿠폰은 모든 고객이 받아서 쓴다고 보고 계산합니다. 정상가는 목표 전체 할인율이 나오도록 역산합니다.</li>
+              <li>개당 마진 = 결제금액 × (1 − 수수료율) − 매입원가 − 추가원가. 할인·쿠폰은 모두 판매자 부담으로 봅니다.</li>
+              <li>실제 판매개수 = 총판매개수 − 체험단개수. 수익 = 실제 판매개수 × 개당 마진.</li>
+              <li>체험단 비용 = 체험단개수 × (체험단 단가 + 결제금액 × 수수료율). 빈박스 발송이라 매입원가는 넣지 않습니다.</li>
+              <li>최종 순수익 = 수익 − 광고비 − 체험단 비용 − CS. END ROAS = 결제금액 ÷ 개당 마진 × (1 + 광고비 VAT).</li>
+            </ul>
+          </details>
+
+          <section aria-label="데이터 백업" class="flex flex-wrap items-center gap-3 rounded-xl border border-line bg-surface px-4 py-3 text-sm">
+            <p class="min-w-0 flex-1 basis-64 text-xs text-muted text-pretty">모든 데이터는 이 브라우저에만 저장됩니다. 브라우저 데이터를 지우거나 다른 컴퓨터에서 쓰려면 백업 파일로 옮기세요.</p>
+            <input ref=${backupRef} id="restore-file" type="file" accept=".json,application/json" class="sr-only" onChange=${onRestore} />
+            <button type="button" class="rounded-md border border-line px-3 py-2 text-sm hover:bg-soft" onClick=${() => backupRef.current.click()}>백업 불러오기</button>
+            <button type="button" class="rounded-md border border-line px-3 py-2 text-sm hover:bg-soft" onClick=${onBackup}>백업 저장</button>
+          </section>
+        </div>
+      </main>
+
+      <${Modal} open=${!!edOpt} onClose=${() => setEditing(null)} labelledBy="edit-title" wide>
+        ${edOpt && html`
+          <div class="flex flex-col">
+            <div class="sticky top-0 z-header flex flex-wrap items-end gap-3 border-b border-line bg-surface px-5 py-4">
+              <div class="flex min-w-0 flex-1 flex-col gap-1">
+                <h2 id="edit-title" class="truncate text-xs font-medium text-muted">${ed.name}</h2>
+                <input aria-label="규격 / 옵션" placeholder="예: 3kg" value=${edOpt.option}
+                  class="w-full min-w-0 rounded bg-transparent px-1 -mx-1 text-lg font-semibold outline-none hover:bg-soft focus:bg-soft"
+                  onChange=${(e) => setOption(ed.id, edOpt.id, { option: e.target.value })} />
+              </div>
+              <button type="button" class="rounded-md px-3 py-2 text-sm text-muted hover:bg-soft hover:text-neg"
+                onClick=${() => setConfirm({ title: `"${edOpt.option || '규격'}" 규격을 삭제할까요?`, body: '이 규격의 가격·판매·비용 입력값이 지워집니다.', action: '삭제',
+                  onConfirm: () => { setProduct(ed.id, (p) => ({ ...p, options: p.options.filter((o) => o.id !== edOpt.id) })); setEditing(null); } })}>규격 삭제</button>
+              <button type="button" class="rounded-md bg-accent px-3 py-2 text-sm font-medium text-accent-fg" onClick=${() => setEditing(null)}>완료</button>
+            </div>
+            <div class="p-5">
+              <${OptionForm} opt=${edOpt} set=${(patch) => setOption(ed.id, edOpt.id, patch)} settings=${g} idp=${'e-' + edOpt.id + '-'} />
+            </div>
+          </div>`}
+      </${Modal}>
+      <${Confirm} state=${confirm} onClose=${() => setConfirm(null)} />
+    </div>`;
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(html`<${App} />`);
+</script>
+
+</body>
+</html>
