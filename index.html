@@ -670,7 +670,7 @@ function Confirm({ state, onClose }) {
           <p class="text-sm text-muted text-pretty">${state.body}</p>
           <div class="flex justify-end gap-2">
             <button type="button" class="rounded-md border border-line px-3 py-2 text-sm hover:bg-soft" onClick=${onClose}>취소</button>
-            <button type="button" class="rounded-md bg-neg px-3 py-2 text-sm font-medium text-white hover:bg-neg/90"
+            <button type="button" class=${'rounded-md px-3 py-2 text-sm font-medium ' + (state.tone === 'accent' ? 'bg-accent text-accent-fg hover:bg-accent/90' : 'bg-neg text-white hover:bg-neg/90')}
               onClick=${() => { state.onConfirm(); onClose(); }}>${state.action}</button>
           </div>
         </div>`}
@@ -706,7 +706,7 @@ function Summary({ t }) {
     </section>`;
 }
 
-function ProductCard({ p, settings, onRename, onEdit, onAdd, onDelete }) {
+function ProductCard({ p, settings, onRename, onEdit, onAdd, onDelete, onSend, sendLabel }) {
   const t = calcTotals(p.options, settings);
   return html`
     <section class="rounded-xl border border-line bg-surface">
@@ -716,6 +716,7 @@ function ProductCard({ p, settings, onRename, onEdit, onAdd, onDelete }) {
         <span class="text-sm tabular-nums">순수익 <b class=${tone(t.finalNet)}>${won(t.finalNet)}</b></span>
         <div class="flex gap-2">
           <button type="button" class="rounded-md border border-line px-2.5 py-1.5 text-sm hover:bg-soft" onClick=${onAdd}>규격 추가</button>
+          <button type="button" class="rounded-md border border-line px-2.5 py-1.5 text-sm hover:bg-soft" onClick=${onSend}>${sendLabel}</button>
           <button type="button" class="rounded-md px-2.5 py-1.5 text-sm text-muted hover:bg-soft hover:text-neg" onClick=${onDelete}>상품 삭제</button>
         </div>
       </header>
@@ -1338,6 +1339,7 @@ function App() {
     : [calcSave, anSave].includes('saved') ? 'saved' : 'idle';
   const [tab, setTab] = useState('list');
   const [channel, setChannel] = useState('coupang');
+  const [query, setQuery] = useState('');
   const [sideOpen, setSideOpen] = useState(() => { try { return localStorage.getItem(SIDE_KEY) === 'open'; } catch (e) { return false; } });
   useEffect(() => { try { localStorage.setItem(SIDE_KEY, sideOpen ? 'open' : 'closed'); } catch (e) {} }, [sideOpen]);
   // 패널 너비: 왼쪽 가장자리를 끌어서 조절, 마지막 너비 기억. 본문이 너무 좁아지지 않게 화면 너비에 맞춰 제한
@@ -1403,6 +1405,28 @@ function App() {
     for (const l of links) if (l.key === key) ids.push(l.optionId);
     return { ...o, optionId: ids.join(', ') };
   }) })) }));
+
+  // 상품명·규격·산지로 검색 (띄어쓰기·대소문자 무시)
+  const norm = (x) => String(x || '').replace(/\s+/g, '').toLowerCase();
+  const q = norm(query);
+  const shown = q ? chProducts.filter((p) => [p.name, ...p.options.flatMap((o) => [o.option, o.supplier, o.supplierItem])].some((x) => norm(x).includes(q))) : chProducts;
+
+  // 다른 판매처로 상품 보내기: 가격·원가·산지·쿠폰 설정은 복사, 판매처마다 다른 판매·광고 기록과 쿠팡 옵션 ID는 비움
+  const other = channel === 'toss' ? 'coupang' : 'toss';
+  const otherName = other === 'toss' ? '토스' : '쿠팡';
+  const otherTo = other === 'toss' ? '토스로' : '쿠팡으로';
+  const sendProduct = (p) => {
+    const copy = { ...p, id: uid(), channel: other, options: p.options.map((o) => ({ ...o, id: uid(),
+      optionId: '', totalSales: '', trialCount: '', trialPrice: '', adCost: '', cs: '' })) };
+    const doSend = () => {
+      update((d) => ({ ...d, products: [...d.products, copy] }));
+      setNotice({ kind: 'ok', text: `"${p.name}" 상품(규격 ${p.options.length}개)을 ${otherTo} 보냈습니다. 판매량·체험단·광고비·CS는 비워 두었습니다.`,
+        action: { label: `${otherName}에서 보기`, onClick: () => { setChannel(other); setQuery(''); } } });
+    };
+    if (data.products.some((x) => channelOf(x) === other && x.name.trim() === p.name.trim()))
+      setConfirm({ title: `${otherName}에 같은 이름의 상품이 있습니다`, body: `"${p.name}" 상품이 이미 ${otherName}에 있습니다. 하나 더 복사할까요? 기존 상품은 그대로 둡니다.`, action: '하나 더 보내기', tone: 'accent', onConfirm: doSend });
+    else doSend();
+  };
 
   const addProduct = (seed) => {
     const o = emptyOption(seed ? { ...seed, id: uid() } : {});
@@ -1493,6 +1517,7 @@ function App() {
           ${notice ? html`
             <div role="status" class=${'flex items-start gap-3 rounded-lg px-4 py-3 text-sm ' + (notice.kind === 'err' ? 'bg-neg/10 text-neg' : 'bg-pos/10 text-pos')}>
               <p class="min-w-0 flex-1 text-pretty">${notice.text}</p>
+              ${notice.action ? html`<button type="button" class="whitespace-nowrap rounded-md border border-current px-2.5 py-1 text-xs font-medium" onClick=${() => { notice.action.onClick(); setNotice(null); }}>${notice.action.label}</button>` : null}
               <button type="button" aria-label="알림 닫기" class="rounded px-1.5 hover:bg-line" onClick=${() => setNotice(null)}>×</button>
             </div>` : null}
 
@@ -1510,7 +1535,16 @@ function App() {
                   class=${'rounded-md px-4 py-1.5 text-sm ' + (channel === k ? 'bg-surface font-semibold text-fg shadow-sm' : 'text-muted hover:text-fg')}
                   onClick=${() => { setChannel(k); setEditing(null); }}>${label}</button>`)}
             </div>
-            <span class="text-xs text-muted">${chName} 상품 ${chProducts.length}개 · 수수료율과 상품 목록은 판매처마다 따로 저장됩니다</span>
+            <span class="min-w-0 flex-1 text-xs text-muted">${chName} 상품 ${chProducts.length}개 · 수수료율과 상품 목록은 판매처마다 따로 저장됩니다</span>
+            ${tab === 'list' ? html`
+              <label for="product-search" class="relative ml-auto w-full sm:w-72">
+                <span class="sr-only">상품명 검색</span>
+                <svg aria-hidden="true" viewBox="0 0 24 24" class="pointer-events-none absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-muted" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+                <input id="product-search" type="text" role="searchbox" enterkeyhint="search" value=${query} placeholder="상품명·산지 검색" autocomplete="off" onChange=${(e) => setQuery(e.target.value)}
+                  onKeyDown=${(e) => { if (e.key === 'Escape') setQuery(''); }}
+                  class="w-full rounded-md border border-line bg-surface py-2 pl-8 pr-8 text-sm outline-none focus:border-accent" />
+                ${query ? html`<button type="button" aria-label="검색어 지우기" class="absolute right-1.5 top-1/2 -translate-y-1/2 rounded px-1.5 text-muted hover:bg-soft hover:text-fg" onClick=${() => setQuery('')}>×</button>` : null}
+              </label>` : null}
           </div>
 
           ${channel === 'toss' ? html`
@@ -1559,8 +1593,14 @@ function App() {
           : tab === 'list' ? html`
             <div id="panel-list" role="tabpanel" aria-labelledby="tab-list" class="flex flex-col gap-4">
               <${Summary} t=${totals} />
-              ${chProducts.length ? chProducts.map((p) => html`
-                <${ProductCard} key=${p.id} p=${p} settings=${g}
+              ${query.trim() && chProducts.length ? html`<p class="text-sm text-muted" aria-live="polite">"${query.trim()}" 검색 결과 ${shown.length}개 / 전체 ${chProducts.length}개 · 위 합계는 전체 기준입니다</p>` : null}
+              ${query.trim() && chProducts.length && !shown.length ? html`
+                <div class="flex flex-col items-center gap-3 rounded-xl border border-dashed border-line px-4 py-10 text-center">
+                  <p class="text-sm text-muted">"${query.trim()}"에 맞는 ${chName} 상품이 없습니다.</p>
+                  <button type="button" class="rounded-md border border-line px-3 py-2 text-sm hover:bg-soft" onClick=${() => setQuery('')}>검색어 지우기</button>
+                </div>` : null}
+              ${chProducts.length ? shown.map((p) => html`
+                <${ProductCard} key=${p.id} p=${p} settings=${g} sendLabel=${otherTo + ' 보내기'} onSend=${() => sendProduct(p)}
                   onRename=${(name) => setProduct(p.id, (x) => ({ ...x, name }))}
                   onEdit=${(oid) => setEditing({ pid: p.id, oid })}
                   onAdd=${() => addOption(p.id)}
