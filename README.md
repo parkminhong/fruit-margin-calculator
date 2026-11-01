@@ -143,6 +143,7 @@ index.html            계산기 전체 (화면 + 계산 로직)
 assets/tailwind.css   미리 빌드한 화면 스타일
 vendor/               React 18.3.1, htm 3.1.1, SheetJS 0.18.5 (오프라인 동작용)
 docs/screenshots/     README 스크린샷 (예시 데이터)
+LICENSE               MIT 라이선스 (라이브러리 라이선스는 vendor/LICENSE-*.txt)
 ```
 
 ## 화면 스타일을 고칠 때
@@ -154,7 +155,20 @@ npm install
 npm run build:css
 ```
 
-## 함께 들어 있는 라이브러리
+## 저작권과 라이선스
+
+Copyright (c) 2026 parkminhong
+
+이 계산기는 [MIT 라이선스](LICENSE)로 공개합니다.
+
+- 누구나 자유롭게 쓰고, 고치고, 다시 배포하고, 상업적으로도 쓸 수 있습니다.
+- 다만 복사하거나 고쳐서 배포할 때는 위 저작권 표시와 [LICENSE](LICENSE) 내용을 함께 넣어야 합니다.
+- 계산 결과는 참고용입니다. 계산기를 써서 생긴 손실이나 문제에 대해 저작자는 책임지지 않습니다. 수수료율과 정산 금액은 쿠팡·토스의 실제 안내로 꼭 확인하세요.
+- 스크린샷의 상품명과 숫자는 모두 예시입니다. 쿠팡·토스 등 상표와 이름은 각 회사의 것입니다.
+
+### 함께 들어 있는 라이브러리
+
+`vendor/` 폴더의 라이브러리는 이 저장소의 MIT 라이선스가 아니라 각자의 라이선스를 따릅니다. 라이선스 전문은 `vendor/LICENSE-*.txt`에 있습니다.
 
 - [React](https://react.dev) 18.3.1 (MIT)
 - [htm](https://github.com/developit/htm) 3.1.1 (Apache-2.0)

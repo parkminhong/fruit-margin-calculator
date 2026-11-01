@@ -1638,6 +1638,10 @@ function App() {
             <button type="button" class="rounded-md border border-line px-3 py-2 text-sm hover:bg-soft" onClick=${() => backupRef.current.click()}>백업 불러오기</button>
             <button type="button" class="rounded-md border border-line px-3 py-2 text-sm hover:bg-soft" onClick=${onBackup}>백업 저장</button>
           </section>
+
+          <footer class="pb-2 text-center text-xs text-muted">
+            © 2026 parkminhong · <a class="underline hover:text-fg" href="https://github.com/parkminhong/fruit-margin-calculator" target="_blank" rel="noopener">MIT 라이선스</a> · 계산 결과는 참고용이며 실제 수수료와 정산 금액은 판매처 안내로 확인하세요.
+          </footer>
         </main>
         ${sideOpen ? html`
           <div class="fixed inset-0 z-drawer bg-black/40 lg:hidden" aria-hidden="true" onClick=${() => setSideOpen(false)}></div>
