@@ -368,7 +368,8 @@ const DEFAULT_SETTINGS = { feeRate: 0.1166, priceUnit: 100, adVat: 0.1 };
 // 판매처: 상품과 공통 설정(수수료율 등)을 판매처별로 따로 둔다. 토스 수수료율은 사용자가 확인해 입력
 const CHANNELS = [['coupang', '쿠팡'], ['toss', '토스']];
 const DEFAULT_TOSS_SETTINGS = { feeRate: '', priceUnit: 100, adVat: 0.1, tier: '', saleRate: 0.08, cpc: false, vat: true };
-// 토스쇼핑 수수료 = 결제수수료(연매출 등급별) + 상품판매수수료(8%, CPC 광고 유입 상품은 0%). 출처: 윈들리(windly.cc) 정리표
+// 토스쇼핑 수수료 = 토스페이 결제수수료(연매출 등급별) + 상품판매수수료 8%, 모두 VAT 별도 (출처: 토스쇼핑 판매자 가이드)
+// CPC 광고 유입 상품의 상품판매수수료 0%는 윈들리(windly.cc) 정리 기준
 const TOSS_TIERS = [
   ['micro', '영세 (연매출 3억 미만)', 0.016], ['small1', '중소1 (3억~5억)', 0.019], ['small2', '중소2 (5억~10억)', 0.0215],
   ['small3', '중소3 (10억~30억)', 0.024], ['general', '일반 (30억 초과)', 0.03],
@@ -1520,14 +1521,14 @@ function App() {
             </div>
             <div class="flex flex-wrap items-center gap-x-6 gap-y-2 text-sm">
               <label class="flex items-center gap-2"><input type="checkbox" checked=${!!g.cpc} onChange=${(e) => setTossFee({ cpc: e.target.checked })} class="size-4 accent-[rgb(var(--accent))]" />CPC 광고 유입 상품 (상품판매수수료 0%)</label>
-              <label class="flex items-center gap-2"><input type="checkbox" checked=${g.vat !== false} onChange=${(e) => setTossFee({ vat: e.target.checked })} class="size-4 accent-[rgb(var(--accent))]" />수수료에 부가세 10% 더하기</label>
+              <label class="flex items-center gap-2"><input type="checkbox" checked=${g.vat !== false} onChange=${(e) => setTossFee({ vat: e.target.checked })} class="size-4 accent-[rgb(var(--accent))]" />수수료에 부가세 10% 더하기 <span class="text-xs text-muted">(토스 공식 요율은 VAT 별도)</span></label>
             </div>
             <p class=${'text-sm tabular-nums ' + (!g.tier ? 'font-medium text-warn' : '')}>${!g.tier
               ? (feeMissing ? '사업자 등급을 고르면 수수료율이 계산됩니다. 고르기 전에는 수수료 0%로 계산돼 마진이 실제보다 크게 나옵니다.'
                 : `사업자 등급을 고르면 수수료율을 다시 계산합니다. 지금은 전에 직접 넣은 ${pct(num(g.feeRate), 2)}를 씁니다.`)
               : html`적용 수수료율 <b class="text-base">${pct(num(g.feeRate), 2)}</b>
                 <span class="text-xs text-muted"> = (결제 ${pct(TOSS_TIERS.find((x) => x[0] === g.tier)[2], 2)} + 상품판매 ${pct(g.cpc ? 0 : num(g.saleRate ?? 0.08), 2)})${g.vat !== false ? ' × 1.1 (부가세)' : ''}</span>`}</p>
-            <p class="text-xs text-muted text-pretty">CPC 광고 유입은 광고로 들어온 주문만 상품판매수수료가 0%라, 광고 주문과 일반 주문이 섞이면 실제 수수료는 그 사이입니다. 요율은 토스쇼핑 판매자센터에서 한 번 확인하세요.</p>
+            <p class="text-xs text-muted text-pretty">요율은 토스쇼핑 판매자 가이드 기준입니다(등급은 소상공인 카드 수수료 우대 정책에 따라 1년에 두 번 자동 갱신, 정산은 구매확정일 D+2 영업일). CPC 광고 유입은 광고로 들어온 주문만 상품판매수수료가 0%라, 광고 주문과 일반 주문이 섞이면 실제 수수료는 그 사이입니다.</p>
           </section>` : html`
           <section aria-label=${chName + ' 공통 설정'} class=${'flex flex-wrap items-end gap-4 rounded-xl border bg-surface px-4 py-3 ' + (feeMissing ? 'border-warn' : 'border-line')}>
             <div class="w-40"><${NumField} id=${'g-fee-' + channel} label=${chName + ' 판매수수료율 (VAT 포함)'} kind="pct" value=${g.feeRate} onChange=${(v) => setSettings({ feeRate: v })} /></div>
