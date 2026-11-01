@@ -367,7 +367,18 @@ const SunIcon = () => html`<svg aria-hidden="true" viewBox="0 0 24 24" class="si
 const DEFAULT_SETTINGS = { feeRate: 0.1166, priceUnit: 100, adVat: 0.1 };
 // 판매처: 상품과 공통 설정(수수료율 등)을 판매처별로 따로 둔다. 토스 수수료율은 사용자가 확인해 입력
 const CHANNELS = [['coupang', '쿠팡'], ['toss', '토스']];
-const DEFAULT_TOSS_SETTINGS = { feeRate: '', priceUnit: 100, adVat: 0.1 };
+const DEFAULT_TOSS_SETTINGS = { feeRate: '', priceUnit: 100, adVat: 0.1, tier: '', saleRate: 0.08, cpc: false, vat: true };
+// 토스쇼핑 수수료 = 결제수수료(연매출 등급별) + 상품판매수수료(8%, CPC 광고 유입 상품은 0%). 출처: 윈들리(windly.cc) 정리표
+const TOSS_TIERS = [
+  ['micro', '영세 (연매출 3억 미만)', 0.016], ['small1', '중소1 (3억~5억)', 0.019], ['small2', '중소2 (5억~10억)', 0.0215],
+  ['small3', '중소3 (10억~30억)', 0.024], ['general', '일반 (30억 초과)', 0.03],
+];
+function tossFee(t) {
+  const tier = TOSS_TIERS.find((x) => x[0] === t.tier);
+  if (!tier) return '';
+  const rate = tier[2] + (t.cpc ? 0 : num(t.saleRate ?? 0.08));
+  return +(rate * (t.vat === false ? 1 : 1.1)).toFixed(6);
+}
 const settingsKey = (ch) => (ch === 'toss' ? 'tossSettings' : 'settings');
 const channelOf = (p) => p.channel || 'coupang';
 const emptyOption = (o = {}) => ({ id: uid(), option: '', cost: '', extraCost: 0, targetPay: '',
@@ -1367,6 +1378,11 @@ function App() {
 
   const update = (fn) => setData((d) => ({ ...fn(d), isExample: false }));
   const setSettings = (patch) => update((d) => ({ ...d, [settingsKey(channel)]: { ...(d[settingsKey(channel)] || DEFAULT_TOSS_SETTINGS), ...patch } }));
+  // 토스: 등급·상품판매수수료·CPC·부가세가 바뀌면 적용 수수료율(feeRate)을 다시 계산해 저장
+  const setTossFee = (patch) => update((d) => {
+    const t = { ...DEFAULT_TOSS_SETTINGS, ...(d.tossSettings || {}), ...patch };
+    return { ...d, tossSettings: { ...t, feeRate: tossFee(t) } };
+  });
   const setProduct = (pid, fn) => update((d) => ({ ...d, products: d.products.map((p) => (p.id === pid ? fn(p) : p)) }));
   const setOption = (pid, oid, patch) => setProduct(pid, (p) => ({ ...p, options: p.options.map((o) => (o.id === oid ? { ...o, ...patch } : o)) }));
 
@@ -1487,6 +1503,32 @@ function App() {
             <span class="text-xs text-muted">${chName} 상품 ${chProducts.length}개 · 수수료율과 상품 목록은 판매처마다 따로 저장됩니다</span>
           </div>
 
+          ${channel === 'toss' ? html`
+          <section aria-label="토스 공통 설정" class=${'flex flex-col gap-3 rounded-xl border bg-surface px-4 py-3 ' + (feeMissing ? 'border-warn' : 'border-line')}>
+            <div class="flex flex-wrap items-end gap-4">
+              <label for="g-toss-tier" class="flex w-52 flex-col gap-1">
+                <span class="text-xs font-medium text-muted">결제수수료 · 사업자 등급</span>
+                <select id="g-toss-tier" value=${g.tier || ''} onChange=${(e) => setTossFee({ tier: e.target.value })}
+                  class=${'rounded-md border bg-surface px-2 py-2 text-sm ' + (g.tier ? 'border-line' : 'border-warn')}>
+                  <option value="">등급 선택</option>
+                  ${TOSS_TIERS.map(([k, label, r]) => html`<option key=${k} value=${k}>${label} · ${pct(r, 2)}</option>`)}
+                </select>
+              </label>
+              <div class="w-36"><${NumField} id="g-toss-sale" label="상품판매수수료" kind="pct" value=${g.saleRate ?? 0.08} onChange=${(v) => setTossFee({ saleRate: v })} /></div>
+              <div class="w-32"><${NumField} id="g-unit-toss" label="가격 올림 단위" kind="won" value=${g.priceUnit} onChange=${(v) => setSettings({ priceUnit: v })} /></div>
+              <div class="w-32"><${NumField} id="g-vat-toss" label="광고비 VAT" kind="pct" value=${g.adVat} onChange=${(v) => setSettings({ adVat: v })} /></div>
+            </div>
+            <div class="flex flex-wrap items-center gap-x-6 gap-y-2 text-sm">
+              <label class="flex items-center gap-2"><input type="checkbox" checked=${!!g.cpc} onChange=${(e) => setTossFee({ cpc: e.target.checked })} class="size-4 accent-[rgb(var(--accent))]" />CPC 광고 유입 상품 (상품판매수수료 0%)</label>
+              <label class="flex items-center gap-2"><input type="checkbox" checked=${g.vat !== false} onChange=${(e) => setTossFee({ vat: e.target.checked })} class="size-4 accent-[rgb(var(--accent))]" />수수료에 부가세 10% 더하기</label>
+            </div>
+            <p class=${'text-sm tabular-nums ' + (!g.tier ? 'font-medium text-warn' : '')}>${!g.tier
+              ? (feeMissing ? '사업자 등급을 고르면 수수료율이 계산됩니다. 고르기 전에는 수수료 0%로 계산돼 마진이 실제보다 크게 나옵니다.'
+                : `사업자 등급을 고르면 수수료율을 다시 계산합니다. 지금은 전에 직접 넣은 ${pct(num(g.feeRate), 2)}를 씁니다.`)
+              : html`적용 수수료율 <b class="text-base">${pct(num(g.feeRate), 2)}</b>
+                <span class="text-xs text-muted"> = (결제 ${pct(TOSS_TIERS.find((x) => x[0] === g.tier)[2], 2)} + 상품판매 ${pct(g.cpc ? 0 : num(g.saleRate ?? 0.08), 2)})${g.vat !== false ? ' × 1.1 (부가세)' : ''}</span>`}</p>
+            <p class="text-xs text-muted text-pretty">CPC 광고 유입은 광고로 들어온 주문만 상품판매수수료가 0%라, 광고 주문과 일반 주문이 섞이면 실제 수수료는 그 사이입니다. 요율은 토스쇼핑 판매자센터에서 한 번 확인하세요.</p>
+          </section>` : html`
           <section aria-label=${chName + ' 공통 설정'} class=${'flex flex-wrap items-end gap-4 rounded-xl border bg-surface px-4 py-3 ' + (feeMissing ? 'border-warn' : 'border-line')}>
             <div class="w-40"><${NumField} id=${'g-fee-' + channel} label=${chName + ' 판매수수료율 (VAT 포함)'} kind="pct" value=${g.feeRate} onChange=${(v) => setSettings({ feeRate: v })} /></div>
             <div class="w-32"><${NumField} id=${'g-unit-' + channel} label="가격 올림 단위" kind="won" value=${g.priceUnit} onChange=${(v) => setSettings({ priceUnit: v })} /></div>
@@ -1494,7 +1536,7 @@ function App() {
             <p class=${'min-w-0 flex-1 basis-60 text-xs text-pretty ' + (feeMissing ? 'font-medium text-warn' : 'text-muted')}>${feeMissing
               ? `${chName} 판매수수료율을 입력하세요. 비어 있으면 수수료 0%로 계산돼 마진이 실제보다 크게 나옵니다.`
               : '수수료율은 개당 마진과 체험단 가구매 수수료에 함께 적용됩니다. 체험단은 빈박스 발송이라 매입원가가 들어가지 않습니다.'}</p>
-          </section>
+          </section>`}
 
           ${tab === 'analysis' ? (channel === 'coupang'
             ? html`<${AnalysisPanel} an=${an} setAn=${setAn} calc=${{ ...data, settings: data.settings, products: chProducts }} onLink=${onLink} setConfirm=${setConfirm} setNotice=${setNotice} />`
