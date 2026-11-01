@@ -966,6 +966,7 @@ function LinkDialog({ open, onClose, items, calc, onLink }) {
 // ───────────── 가격 정하기: 경쟁 상품 가격 3~10개의 중앙값·평균값으로 목표 결제금액 정하기 ─────────────
 const PRICE_SLOTS = 10, PRICE_MIN = 3;
 const SIDE_KEY = 'fruit-margin-side-pricing';
+const SIDE_W_KEY = 'fruit-margin-side-width', SIDE_W_DEFAULT = 352, SIDE_W_MIN = 300, SIDE_W_MAX = 760;
 const emptyPricing = () => ({ name: '', prices: Array(PRICE_SLOTS).fill(''), basis: 'median', adjust: 0, unit: 100 });
 function priceStats(prices) {
   const v = prices.map(num).filter((x) => x > 0).sort((a, b) => a - b);
@@ -1032,7 +1033,7 @@ function PricingPanel({ pricing, setPricing, products, onApplyQuick, onApplyOpti
             <button type="button" disabled=${s.n === 0} onClick=${() => set({ prices: Array(PRICE_SLOTS).fill('') })}
               class="whitespace-nowrap rounded-md border border-line px-2.5 py-1.5 text-xs hover:bg-soft disabled:opacity-50">가격 1~${PRICE_SLOTS}번 초기화</button>
           </div>
-          <div class="grid grid-cols-2 gap-2">
+          <div class="grid grid-cols-[repeat(auto-fill,minmax(8.5rem,1fr))] gap-2">
             ${p.prices.map((v, i) => html`<${NumField} key=${i} id=${'pr-' + i} label=${`${i + 1}번`} kind="won" value=${v} onChange=${(x) => setPrice(i, x)} />`)}
           </div>
           ${enough ? html`<${PriceStrip} s=${s} pick=${p.basis} />`
@@ -1318,6 +1319,21 @@ function App() {
   const [channel, setChannel] = useState('coupang');
   const [sideOpen, setSideOpen] = useState(() => { try { return localStorage.getItem(SIDE_KEY) === 'open'; } catch (e) { return false; } });
   useEffect(() => { try { localStorage.setItem(SIDE_KEY, sideOpen ? 'open' : 'closed'); } catch (e) {} }, [sideOpen]);
+  // 패널 너비: 왼쪽 가장자리를 끌어서 조절, 마지막 너비 기억. 본문이 너무 좁아지지 않게 화면 너비에 맞춰 제한
+  const clampW = (w) => Math.round(Math.max(SIDE_W_MIN, Math.min(w, SIDE_W_MAX, window.innerWidth - 560)));
+  const [sideW, setSideW] = useState(() => { try { const v = Number(localStorage.getItem(SIDE_W_KEY)); return v >= SIDE_W_MIN && v <= SIDE_W_MAX ? v : SIDE_W_DEFAULT; } catch (e) { return SIDE_W_DEFAULT; } });
+  useEffect(() => { try { localStorage.setItem(SIDE_W_KEY, String(sideW)); } catch (e) {} }, [sideW]);
+  const startResize = (e) => {
+    e.preventDefault();
+    const x0 = e.clientX, w0 = sideW;
+    const move = (ev) => setSideW(clampW(w0 + (x0 - ev.clientX)));
+    const up = () => {
+      window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up);
+      document.body.style.cursor = ''; document.body.style.userSelect = '';
+    };
+    document.body.style.cursor = 'col-resize'; document.body.style.userSelect = 'none';
+    window.addEventListener('pointermove', move); window.addEventListener('pointerup', up);
+  };
   // 좁은 화면에서 서랍으로 열렸을 때 Esc로 닫기
   useEffect(() => {
     const onKey = (e) => { if (e.key === 'Escape' && sideOpen && !matchMedia('(min-width: 1024px)').matches && !document.querySelector('dialog[open]')) setSideOpen(false); };
@@ -1417,10 +1433,9 @@ function App() {
     : mode === 'browser' ? (saveState === 'error' ? '이 브라우저에 저장 실패' : '이 브라우저에만 저장') : '';
 
   return html`
-    <div class="min-h-dvh lg:flex">
-     <div class="min-w-0 flex-1">
+    <div class="min-h-dvh" style=${{ '--side-w': sideW + 'px', '--group-max': sideOpen ? `calc(72rem + ${sideW}px + 1.5rem)` : '72rem' }}>
       <header class="wrap border-b border-line bg-surface">
-        <div class="mx-auto flex max-w-6xl flex-wrap items-center gap-x-6 gap-y-3 py-4">
+        <div class="mx-auto flex max-w-6xl flex-wrap items-center gap-x-6 gap-y-3 py-4 lg:max-w-[var(--group-max)]">
           <div class="flex min-w-0 flex-1 basis-60 flex-col">
             <h1 class="text-lg font-bold text-balance">과일 마진 계산기</h1>
             <p class="text-xs text-muted">쿠팡·토스 판매가 역산 · 개당 마진 · 월별 판매 분석 <span aria-live="polite" class=${saveState === 'error' ? 'text-neg' : ''}>· ${saveLabel}</span></p>
@@ -1440,8 +1455,9 @@ function App() {
         </div>
       </header>
 
-      <main class="wrap py-6">
-        <div class="mx-auto flex max-w-6xl flex-col gap-6">
+      <div class="wrap">
+       <div class="mx-auto flex max-w-6xl items-start gap-6 lg:max-w-[var(--group-max)]">
+        <main class="flex min-w-0 flex-1 flex-col gap-6 py-6">
           ${data.isExample && tab === 'list' && channel === 'coupang' ? html`
             <div class="flex flex-wrap items-center gap-3 rounded-lg border border-warn/40 bg-warn/10 px-4 py-3 text-sm">
               <p class="min-w-0 flex-1 text-pretty"><b>예시 데이터입니다.</b> 쓰고 있는 계산기 엑셀을 불러오면 상품과 규격이 그대로 들어옵니다.</p>
@@ -1530,8 +1546,29 @@ function App() {
             <button type="button" class="rounded-md border border-line px-3 py-2 text-sm hover:bg-soft" onClick=${() => backupRef.current.click()}>백업 불러오기</button>
             <button type="button" class="rounded-md border border-line px-3 py-2 text-sm hover:bg-soft" onClick=${onBackup}>백업 저장</button>
           </section>
-        </div>
-      </main>
+        </main>
+        ${sideOpen ? html`
+          <div class="fixed inset-0 z-drawer bg-black/40 lg:hidden" aria-hidden="true" onClick=${() => setSideOpen(false)}></div>
+          <aside id="side-pricing" aria-labelledby="side-pricing-title"
+            class="fixed inset-y-0 right-0 z-drawer w-full max-w-sm border-l border-line bg-surface shadow-xl lg:sticky lg:top-6 lg:z-auto lg:my-6 lg:h-[calc(100dvh-3rem)] lg:w-[var(--side-w)] lg:max-w-none lg:shrink-0 lg:overflow-hidden lg:rounded-xl lg:border lg:shadow-sm"
+            style=${{ paddingRight: 'env(safe-area-inset-right, 0px)', paddingBottom: 'env(safe-area-inset-bottom, 0px)' }}>
+            <div role="separator" aria-orientation="vertical" aria-label="가격 정하기 너비 조절" tabindex="0"
+              aria-valuemin=${SIDE_W_MIN} aria-valuemax=${SIDE_W_MAX} aria-valuenow=${sideW} title="끌어서 너비 조절 · 두 번 누르면 기본 너비"
+              class="group absolute inset-y-0 left-0 z-header hidden w-3 cursor-col-resize outline-none lg:block"
+              onPointerDown=${startResize} onDoubleClick=${() => setSideW(clampW(SIDE_W_DEFAULT))}
+              onKeyDown=${(e) => { if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') { e.preventDefault(); setSideW((w) => clampW(w + (e.key === 'ArrowLeft' ? 24 : -24))); } }}>
+              <span class="absolute inset-y-0 left-0 w-0.5 bg-transparent group-hover:bg-accent group-focus-visible:bg-accent"></span>
+              <span class="absolute left-1 top-1/2 h-10 w-1 -translate-y-1/2 rounded-full bg-line group-hover:bg-accent group-focus-visible:bg-accent"></span>
+            </div>
+            <div class="h-full overflow-y-auto">
+              <${PricingPanel} pricing=${data.priceSet || data.pricing?.coupang} products=${data.products} onClose=${() => setSideOpen(false)}
+                setPricing=${(v) => setData((d) => ({ ...d, priceSet: v }))}
+                onApplyQuick=${(price) => { setQuick((q) => ({ ...q, targetPay: price })); setTab('quick'); setNotice({ kind: 'ok', text: `빠른 계산의 목표 결제금액을 ${won(price)}으로 바꿨습니다.` }); }}
+                onApplyOption=${(pid, oid, price, label) => { setOption(pid, oid, { targetPay: price }); setNotice({ kind: 'ok', text: `${label}의 목표 결제금액을 ${won(price)}으로 바꿨습니다.` }); }} />
+            </div>
+          </aside>` : null}
+       </div>
+      </div>
 
       <${Modal} open=${!!edOpt} onClose=${() => setEditing(null)} labelledBy="edit-title" wide>
         ${edOpt && html`
@@ -1554,17 +1591,6 @@ function App() {
           </div>`}
       </${Modal}>
       <${Confirm} state=${confirm} onClose=${() => setConfirm(null)} />
-     </div>
-      ${sideOpen ? html`
-        <div class="fixed inset-0 z-drawer bg-black/40 lg:hidden" aria-hidden="true" onClick=${() => setSideOpen(false)}></div>
-        <aside id="side-pricing" aria-labelledby="side-pricing-title"
-          class="fixed inset-y-0 right-0 z-drawer w-full max-w-sm overflow-y-auto border-l border-line bg-surface shadow-xl lg:sticky lg:top-0 lg:z-auto lg:h-dvh lg:w-[22rem] lg:max-w-none lg:shrink-0 lg:self-start lg:shadow-none"
-          style=${{ paddingRight: 'env(safe-area-inset-right, 0px)', paddingBottom: 'env(safe-area-inset-bottom, 0px)' }}>
-          <${PricingPanel} pricing=${data.priceSet || data.pricing?.coupang} products=${data.products} onClose=${() => setSideOpen(false)}
-            setPricing=${(v) => setData((d) => ({ ...d, priceSet: v }))}
-            onApplyQuick=${(price) => { setQuick((q) => ({ ...q, targetPay: price })); setTab('quick'); setNotice({ kind: 'ok', text: `빠른 계산의 목표 결제금액을 ${won(price)}으로 바꿨습니다.` }); }}
-            onApplyOption=${(pid, oid, price, label) => { setOption(pid, oid, { targetPay: price }); setNotice({ kind: 'ok', text: `${label}의 목표 결제금액을 ${won(price)}으로 바꿨습니다.` }); }} />
-        </aside>` : null}
     </div>`;
 }
 
