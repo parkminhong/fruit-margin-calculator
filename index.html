@@ -404,13 +404,24 @@ function useDoc(lsKey, initial, fix) {
   });
   const [saveState, setSaveState] = useState('idle'); // idle | saved | error
   const first = useRef(true);
+  const pending = useRef(null);
+  const write = (v) => {
+    try { localStorage.setItem(lsKey, JSON.stringify(v)); pending.current = null; setSaveState('saved'); } catch (e) { setSaveState('error'); }
+  };
   useEffect(() => {
     if (first.current) { first.current = false; return; }
-    const t = setTimeout(() => {
-      try { localStorage.setItem(lsKey, JSON.stringify(data)); setSaveState('saved'); } catch (e) { setSaveState('error'); }
-    }, 400);
+    pending.current = data;
+    const t = setTimeout(() => write(data), 400);
     return () => clearTimeout(t);
   }, [data]);
+  // 입력 직후 탭을 닫거나 새로고침해도 마지막 변경이 남도록 바로 저장
+  useEffect(() => {
+    const flush = () => { if (pending.current) write(pending.current); };
+    const onHide = () => { if (document.visibilityState === 'hidden') flush(); };
+    window.addEventListener('pagehide', flush);
+    document.addEventListener('visibilitychange', onHide);
+    return () => { window.removeEventListener('pagehide', flush); document.removeEventListener('visibilitychange', onHide); };
+  }, []);
   return { data, setData, mode: 'browser', saveState };
 }
 
@@ -949,7 +960,7 @@ function LinkDialog({ open, onClose, items, calc, onLink }) {
 
 // ───────────── 가격 정하기: 경쟁 상품 가격 3~10개의 중앙값·평균값으로 목표 결제금액 정하기 ─────────────
 const PRICE_SLOTS = 10, PRICE_MIN = 3;
-const emptyPricing = () => ({ name: '', prices: Array(PRICE_SLOTS).fill(''), basis: 'median', adjust: 0 });
+const emptyPricing = () => ({ name: '', prices: Array(PRICE_SLOTS).fill(''), basis: 'median', adjust: 0, unit: 100 });
 function priceStats(prices) {
   const v = prices.map(num).filter((x) => x > 0).sort((a, b) => a - b);
   if (!v.length) return { n: 0 };
@@ -973,17 +984,17 @@ function PriceStrip({ s, pick }) {
     </div>`;
 }
 
-function PricingPanel({ pricing, setPricing, settings, chName, products, onApplyQuick, onApplyOption }) {
+function PricingPanel({ pricing, setPricing, products, onApplyQuick, onApplyOption }) {
   const [target, setTarget] = useState('');
   const p = pricing || emptyPricing();
   const set = (patch) => setPricing({ ...p, ...patch });
   const setPrice = (i, v) => set({ prices: p.prices.map((x, j) => (j === i ? v : x)) });
   const s = priceStats(p.prices);
   const enough = s.n >= PRICE_MIN;
-  const unit = num(settings.priceUnit) || 1;
+  const unit = num(p.unit ?? 100) || 1;
   const base = enough ? (p.basis === 'mean' ? s.mean : s.median) : null;
   const price = base == null ? null : Math.max(0, Math.round((base + num(p.adjust)) / unit) * unit);
-  const specs = products.flatMap((pr) => pr.options.map((o) => ({ value: pr.id + '|' + o.id, label: `${pr.name} · ${o.option || '규격 없음'}`, pid: pr.id, oid: o.id })));
+  const specs = products.flatMap((pr) => pr.options.map((o) => ({ value: pr.id + '|' + o.id, label: `[${channelOf(pr) === 'toss' ? '토스' : '쿠팡'}] ${pr.name} · ${o.option || '규격 없음'}`, pid: pr.id, oid: o.id })));
   const sel = specs.find((x) => x.value === target);
   const choice = (key, label, value) => html`
     <label class=${'flex cursor-pointer flex-col gap-1 rounded-lg border p-4 ' + (p.basis === key ? 'border-accent bg-accent/5' : 'border-line hover:bg-soft')}>
@@ -999,9 +1010,13 @@ function PricingPanel({ pricing, setPricing, settings, chName, products, onApply
           <div class="min-w-0 flex-1 basis-60"><${TextField} id="pr-name" label="상품 · 검색어 메모" value=${p.name} placeholder="예: 감홍사과 5kg" onChange=${(v) => set({ name: v })} /></div>
           <button type="button" class="rounded-md px-3 py-2 text-sm text-muted hover:bg-soft hover:text-neg" onClick=${() => setPricing(emptyPricing())}>모두 지우기</button>
         </div>
-        <div>
-          <h2 class="text-sm font-semibold">경쟁 상품 가격 <span class="font-normal text-muted">· ${chName}에서 고객이 실제로 내는 가격, 최소 ${PRICE_MIN}개 · 최대 ${PRICE_SLOTS}개</span></h2>
-          <p class="text-xs text-muted text-pretty">검색 첫 페이지 상위 상품처럼 비교할 상품의 쿠폰 적용 후 가격을 넣으세요. 같은 규격(무게)끼리 넣어야 정확합니다.</p>
+        <div class="flex flex-wrap items-start gap-3">
+          <div class="min-w-0 flex-1 basis-64">
+            <h2 class="text-sm font-semibold">경쟁 상품 가격 <span class="font-normal text-muted">· 고객이 실제로 내는 가격, 최소 ${PRICE_MIN}개 · 최대 ${PRICE_SLOTS}개</span></h2>
+            <p class="text-xs text-muted text-pretty">검색 첫 페이지 상위 상품처럼 비교할 상품의 쿠폰 적용 후 가격을 넣으세요. 같은 규격(무게)끼리 넣어야 정확합니다.</p>
+          </div>
+          <button type="button" disabled=${s.n === 0} onClick=${() => set({ prices: Array(PRICE_SLOTS).fill('') })}
+            class="whitespace-nowrap rounded-md border border-line px-3 py-1.5 text-sm hover:bg-soft disabled:opacity-50">가격 1~${PRICE_SLOTS}번 초기화</button>
         </div>
         <div class="grid grid-cols-2 gap-3 sm:grid-cols-5">
           ${p.prices.map((v, i) => html`<${NumField} key=${i} id=${'pr-' + i} label=${`${i + 1}번`} kind="won" value=${v} onChange=${(x) => setPrice(i, x)} />`)}
@@ -1019,8 +1034,16 @@ function PricingPanel({ pricing, setPricing, settings, chName, products, onApply
           </div>
           <p class="text-xs text-muted text-pretty">중앙값은 유난히 싸거나 비싼 상품의 영향을 덜 받습니다. 가격이 고르게 모여 있으면 평균값도 비슷합니다.</p>
         </fieldset>
-        <${NumField} id="pr-adjust" label="기준가에서 조정" kind="won" value=${p.adjust} onChange=${(v) => set({ adjust: v })}
-          hint=${`예: −500 이면 기준가보다 500원 낮게. ${wonShort(unit)}원 단위로 반올림합니다.`} />
+        <div class="grid grid-cols-[minmax(0,1fr)_auto] items-start gap-3">
+          <${NumField} id="pr-adjust" label="기준가에서 조정" kind="won" value=${p.adjust} onChange=${(v) => set({ adjust: v })}
+            hint="예: −500 이면 기준가보다 500원 낮게" />
+          <label for="pr-unit" class="flex flex-col gap-1">
+            <span class="text-xs font-medium text-muted">반올림 단위</span>
+            <select id="pr-unit" value=${String(unit)} onChange=${(e) => set({ unit: Number(e.target.value) })} class="rounded-md border border-line bg-surface px-2 py-2 text-sm tabular-nums">
+              ${[10, 100, 1000].map((u) => html`<option key=${u} value=${String(u)}>${u.toLocaleString('ko-KR')}원</option>`)}
+            </select>
+          </label>
+        </div>
         <div class="flex flex-col gap-1 rounded-lg bg-soft p-4">
           <span class="text-xs text-muted">정한 가격 (목표 최종 결제금액)</span>
           <span class="text-3xl font-bold tabular-nums">${price == null ? '–' : won(price)}</span>
@@ -1029,7 +1052,7 @@ function PricingPanel({ pricing, setPricing, settings, chName, products, onApply
         <button type="button" disabled=${price == null} onClick=${() => onApplyQuick(price)}
           class="rounded-md bg-accent px-3 py-2 text-sm font-medium text-accent-fg disabled:opacity-50">빠른 계산에서 마진 보기</button>
         <div class="flex flex-col gap-2 border-t border-line pt-4">
-          <label for="pr-target" class="text-xs font-medium text-muted">${chName} 상품 규격에 바로 적용</label>
+          <label for="pr-target" class="text-xs font-medium text-muted">상품 규격에 바로 적용</label>
           <select id="pr-target" value=${target} onChange=${(e) => setTarget(e.target.value)} class="w-full rounded-md border border-line bg-surface px-2 py-2 text-sm">
             <option value="">규격 선택</option>
             ${specs.map((x) => html`<option key=${x.value} value=${x.value}>${x.label}</option>`)}
@@ -1412,6 +1435,7 @@ function App() {
                 onClick=${() => setTab(k)}>${label}</button>`)}
           </div>
 
+          ${tab !== 'pricing' ? html`
           <div class="flex flex-wrap items-center gap-3">
             <div role="tablist" aria-label="판매처" class="inline-flex rounded-lg border border-line bg-soft p-1">
               ${CHANNELS.map(([k, label]) => html`
@@ -1430,6 +1454,7 @@ function App() {
               ? `${chName} 판매수수료율을 입력하세요. 비어 있으면 수수료 0%로 계산돼 마진이 실제보다 크게 나옵니다.`
               : '수수료율은 개당 마진과 체험단 가구매 수수료에 함께 적용됩니다. 체험단은 빈박스 발송이라 매입원가가 들어가지 않습니다.'}</p>
           </section>
+          ` : null}
 
           ${tab === 'analysis' ? (channel === 'coupang'
             ? html`<${AnalysisPanel} an=${an} setAn=${setAn} calc=${{ ...data, settings: data.settings, products: chProducts }} onLink=${onLink} setConfirm=${setConfirm} setNotice=${setNotice} />`
@@ -1439,8 +1464,8 @@ function App() {
                 <h2 class="text-sm font-semibold">토스 판매 파일 분석</h2>
                 <p class="max-w-md text-sm text-muted text-pretty">토스에서 받는 판매 엑셀 양식이 아직 정해지지 않아 분석 기능은 비어 있습니다. 샘플 파일을 주시면 쿠팡과 같은 방식으로 월별 분석을 만들겠습니다.</p>
               </div>`)
-          : tab === 'pricing' ? html`<${PricingPanel} pricing=${data.pricing?.[channel]} settings=${g} chName=${chName} products=${chProducts}
-              setPricing=${(v) => setData((d) => ({ ...d, pricing: { ...(d.pricing || {}), [channel]: v } }))}
+          : tab === 'pricing' ? html`<${PricingPanel} pricing=${data.priceSet || data.pricing?.coupang} products=${data.products}
+              setPricing=${(v) => setData((d) => ({ ...d, priceSet: v }))}
               onApplyQuick=${(price) => { setQuick((q) => ({ ...q, targetPay: price })); setTab('quick'); }}
               onApplyOption=${(pid, oid, price, label) => { setOption(pid, oid, { targetPay: price }); setNotice({ kind: 'ok', text: `${label}의 목표 결제금액을 ${won(price)}으로 바꿨습니다.` }); }} />`
           : tab === 'list' ? html`
