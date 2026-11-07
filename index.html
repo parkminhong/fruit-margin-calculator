@@ -275,7 +275,7 @@ function suggestLinks(items, calc) {
 }
 
 // 그 달에 적용할 단가: 연결된 가격 구간들을 적용 기간 겹치는 일수로, 기간이 없으면 계산기 총판매개수로 가중평균
-function unitFor(blocks, m) {
+function unitFor(blocks, m, fallbackFee = 0) {
   if (!blocks.length) return null;
   const from = `${m}-01`, to = monthEnd(m);
   const dated = blocks.every((b) => b.periodFrom && b.periodTo);
@@ -286,7 +286,7 @@ function unitFor(blocks, m) {
   if (!ws.some((w) => w > 0)) ws = blocks.map(() => 1);
   const W = ws.reduce((a, w) => a + w, 0);
   const avg = (f) => blocks.reduce((a, b, i) => a + ws[i] * f(b), 0) / W;
-  return { cost: avg((b) => num(b.cost) + num(b.extraCost)), coupon: avg((b) => num(b.instantCoupon) + num(b.downloadCoupon)),
+  return { cost: avg((b) => num(b.cost) + num(b.extraCost)), fee: avg((b) => num(b._fee ?? fallbackFee)), coupon: avg((b) => num(b.instantCoupon) + num(b.downloadCoupon)),
     salePrice: avg((b) => calcRow(b, { priceUnit: 100 }).salePrice), dated, blocks: blocks.length };
 }
 
@@ -306,7 +306,7 @@ function analyzeMonth(an, calc, months, m) {
   const products = new Map();
   for (const it of Object.values(M?.items || {})) {
     if (!products.has(it.productId)) products.set(it.productId, { productId: it.productId, name: it.productName, options: [] });
-    products.get(it.productId).options.push({ ...it, unit: unitFor(byId.get(it.optionId) || [], m) });
+    products.get(it.productId).options.push({ ...it, unit: unitFor(byId.get(it.optionId) || [], m, fee) });
   }
   const list = [];
   for (const p of products.values()) {
@@ -320,7 +320,9 @@ function analyzeMonth(an, calc, months, m) {
     const coupon = usages.length ? usages.reduce((a, v) => a + v, 0) : expectedCoupon;
     const couponSource = usages.length ? 'entered' : expectedCoupon != null ? 'expected' : 'none';
     const pay = revenue - (coupon || 0);
-    const commission = pay * fee;
+    for (const o of p.options) o.couponShare = qty ? (coupon || 0) * (o.qty / qty) : 0;
+    // 수수료는 옵션마다 연결된 계산기 상품의 카테고리 수수료로 (연결 안 된 옵션은 기본 수수료)
+    const commission = p.options.reduce((a, o) => a + (o.revenue - o.couponShare) * (o.unit ? o.unit.fee : fee), 0);
     const trialCount = num(inp.trialCount), trialPrice = num(inp.trialPrice);
     const avgPay = qty ? pay / qty : 0;
     const trialCost = trialCount * (avgPay + trialPrice); // 가구매 결제액 환급 + 체험단 지급액 (수수료는 위 수수료에 포함)
@@ -329,7 +331,6 @@ function analyzeMonth(an, calc, months, m) {
     const goods = missingCost ? null : p.options.reduce((a, o) => a + (o.unit ? o.qty * realShare * o.unit.cost : 0), 0);
     const ad = num(inp.ad), cs = num(inp.cs);
     const net = goods == null ? null : pay - commission - trialCost - goods - ad - cs;
-    for (const o of p.options) o.couponShare = qty ? (coupon || 0) * (o.qty / qty) : 0;
     list.push({ ...p, qty, revenue, grossQty: sum('grossQty'), cancelQty: sum('cancelQty'), cancelAmt: sum('cancelAmt'), visitors: sum('visitors'),
       coupon, couponSource, expectedCoupon, couponCount: coupons.length, pay, commission, trialCount, trialPrice, trialCost, goods, missingCost, ad, cs, net });
   }
@@ -384,6 +385,22 @@ function tossFee(t) {
   return +(rate * (t.vat === false ? 1 : 1.1)).toFixed(6);
 }
 const settingsKey = (ch) => (ch === 'toss' ? 'tossSettings' : 'settings');
+// 상품 카테고리별 판매수수료 (쿠팡). 요율은 설정의 '카테고리별 수수료'에서 VAT 포함으로 입력하고, 비어 있으면 기본 수수료율을 쓴다.
+// 토스는 카테고리와 상관없이 같은 수수료라 카테고리 요율을 쓰지 않는다. '직접 입력'은 두 판매처 모두 상품에 넣은 요율을 쓴다.
+const CATEGORIES = [['fruit', '과일'], ['veg', '채소'], ['grain', '쌀·잡곡'], ['seafood', '수산물'], ['meat', '축산물'], ['custom', '직접 입력']];
+const categoryLabel = (k) => (CATEGORIES.find((x) => x[0] === k) || [, '기본'])[1];
+function feeOf(p, g) {
+  if (p.category === 'custom' && p.customFee !== '' && p.customFee != null) return { rate: num(p.customFee), source: '직접 입력' };
+  const cat = channelOf(p) === 'coupang' && p.category && p.category !== 'custom' ? g.categoryFees?.[p.category] : '';
+  if (cat !== '' && cat != null) return { rate: num(cat), source: categoryLabel(p.category) };
+  return { rate: num(g.feeRate), source: '기본' };
+}
+const settingsFor = (p, g) => ({ ...g, feeRate: feeOf(p, g).rate });
+function sumTotals(list) {
+  const out = {};
+  for (const t of list) for (const [k, v] of Object.entries(t)) out[k] = (out[k] || 0) + v;
+  return Object.keys(out).length ? out : calcTotals([], {});
+}
 const channelOf = (p) => p.channel || 'coupang';
 const emptyOption = (o = {}) => ({ id: uid(), option: '', cost: '', extraCost: 0, targetPay: '',
   instantCoupon: 0, downloadCoupon: 0, targetDiscount: 0, trialCount: '', trialPrice: '', totalSales: '', adCost: '', cs: '', optionId: '', periodFrom: '', periodTo: '', supplier: '', supplierItem: '', ...o });
@@ -467,6 +484,7 @@ function parseWorkbook(buf) {
   const idx = {};
   for (const [k, label] of COLS) idx[k] = head.findIndex((c) => [].concat(label).some((l) => c.startsWith(l)));
   if (idx.option < 0 || idx.targetPay < 0) throw new Error('규격 또는 목표 최종 결제금액 열을 찾지 못했습니다.');
+  const catIdx = head.indexOf('카테고리');
 
   const settings = { ...DEFAULT_SETTINGS };
   let settingsFound = false;
@@ -488,9 +506,11 @@ function parseWorkbook(buf) {
     o.optionId = String(o.optionId ?? '').trim();
     o.periodFrom = toDateStr(o.periodFrom) || ''; o.periodTo = toDateStr(o.periodTo) || '';
     const name = String(r[idx.name] ?? '').trim() || '이름 없는 상품';
+    const catLabel = catIdx >= 0 ? String(r[catIdx] ?? '').trim() : '';
+    const category = (CATEGORIES.find(([, label]) => label === catLabel) || [''])[0];
     const last = products[products.length - 1];
     if (last && last.name === name) last.options.push(o);
-    else products.push({ id: uid(), name, options: [o] });
+    else products.push({ id: uid(), name, category, options: [o] });
   }
   if (!products.length) throw new Error('불러올 규격 행이 없습니다.');
   return { isExample: false, settings, settingsFound, products };
@@ -498,13 +518,14 @@ function parseWorkbook(buf) {
 
 function buildWorkbook(data) {
   const g = data.settings;
-  const head = ['상품명', '규격', '옵션 ID', '적용 시작일', '적용 종료일', '산지', '산지 상품명', '매입원가', '추가원가', '목표 최종 결제금액', '즉시할인 쿠폰(정액)', '다운로드 쿠폰(정액)', '목표 전체 할인율',
+  const head = ['상품명', '카테고리', '적용 수수료율', '규격', '옵션 ID', '적용 시작일', '적용 종료일', '산지', '산지 상품명', '매입원가', '추가원가', '목표 최종 결제금액', '즉시할인 쿠폰(정액)', '다운로드 쿠폰(정액)', '목표 전체 할인율',
     '쿠팡 정상가', '쿠팡 판매가', '즉시할인 쿠폰 금액', '다운로드 쿠폰 금액', '최종 결제금액', '최종 할인율', '개당 마진', '마진율',
     '실제 판매개수', '체험단개수', '체험단 단가', '총판매개수', '수익', '광고비(쿠팡애즈)', '마케팅비(체험단)', '비용 차감 순수익', 'END ROAS', 'CS 차감액', '최종 순수익'];
   const rows = [['판매수수료율', g.feeRate, '가격 단위', g.priceUnit, '광고비 VAT', g.adVat], [], head];
   for (const p of data.products) for (const o of p.options) {
-    const c = calcRow(o, g);
-    rows.push([p.name, o.option, o.optionId || '', o.periodFrom || '', o.periodTo || '', o.supplier || '', o.supplierItem || '', num(o.cost), num(o.extraCost), num(o.targetPay), num(o.instantCoupon), num(o.downloadCoupon), num(o.targetDiscount),
+    const f = feeOf(p, g);
+    const c = calcRow(o, { ...g, feeRate: f.rate });
+    rows.push([p.name, p.category ? categoryLabel(p.category) : '', f.rate, o.option, o.optionId || '', o.periodFrom || '', o.periodTo || '', o.supplier || '', o.supplierItem || '', num(o.cost), num(o.extraCost), num(o.targetPay), num(o.instantCoupon), num(o.downloadCoupon), num(o.targetDiscount),
       c.listPrice, c.salePrice, c.instantCouponAmt, c.downloadCouponAmt, c.pay, c.finalDiscount, Math.round(c.margin), c.marginRate,
       c.realSales ?? '수량확인', o.trialCount, o.trialPrice, o.totalSales, c.revenue == null ? '수량확인' : Math.round(c.revenue),
       c.adCost, Math.round(c.trialCost), c.netAfterCost == null ? '수량확인' : Math.round(c.netAfterCost),
@@ -706,13 +727,23 @@ function Summary({ t }) {
     </section>`;
 }
 
-function ProductCard({ p, settings, onRename, onEdit, onAdd, onDelete, onSend, sendLabel }) {
+function ProductCard({ p, settings, fee, onRename, onEdit, onAdd, onDelete, onSend, sendLabel, onCategory }) {
   const t = calcTotals(p.options, settings);
   return html`
     <section class="rounded-xl border border-line bg-surface">
       <header class="flex flex-wrap items-center gap-x-4 gap-y-2 border-b border-line px-4 py-3">
         <input aria-label="상품명" class="min-w-0 flex-1 basis-64 bg-transparent text-base font-semibold outline-none rounded px-1 -mx-1 hover:bg-soft focus:bg-soft"
           value=${p.name} onChange=${(e) => onRename(e.target.value)} />
+        <div class="flex items-center gap-2 text-sm">
+          <label class="sr-only" for=${'cat-' + p.id}>카테고리</label>
+          <select id=${'cat-' + p.id} value=${p.category || ''} onChange=${(e) => onCategory({ category: e.target.value })}
+            class="rounded-md border border-line bg-surface px-2 py-1.5 text-sm">
+            <option value="">카테고리 없음</option>
+            ${CATEGORIES.map(([k, label]) => html`<option key=${k} value=${k}>${label}</option>`)}
+          </select>
+          ${p.category === 'custom' ? html`<div class="w-28"><${NumField} id=${'cf-' + p.id} label="직접 수수료" kind="pct" value=${p.customFee ?? ''} onChange=${(v) => onCategory({ customFee: v })} /></div>` : null}
+          <span class="whitespace-nowrap text-xs tabular-nums text-muted" title="이 상품에 적용되는 판매수수료율 (VAT 포함)">수수료 ${pct(fee.rate, 2)} · ${fee.source}</span>
+        </div>
         <span class="text-sm tabular-nums">순수익 <b class=${tone(t.finalNet)}>${won(t.finalNet)}</b></span>
         <div class="flex gap-2">
           <button type="button" class="rounded-md border border-line px-2.5 py-1.5 text-sm hover:bg-soft" onClick=${onAdd}>규격 추가</button>
@@ -1386,7 +1417,7 @@ function App() {
   const chProducts = data.products.filter((p) => channelOf(p) === channel);
   const allRows = chProducts.flatMap((p) => p.options);
   const feeMissing = g.feeRate === '' || g.feeRate == null;
-  const totals = calcTotals(allRows, g);
+  const totals = sumTotals(chProducts.map((p) => calcTotals(p.options, settingsFor(p, g))));
 
   const update = (fn) => setData((d) => ({ ...fn(d), isExample: false }));
   const setSettings = (patch) => update((d) => ({ ...d, [settingsKey(channel)]: { ...(d[settingsKey(channel)] || DEFAULT_TOSS_SETTINGS), ...patch } }));
@@ -1449,7 +1480,7 @@ function App() {
       const ch = channel, key = settingsKey(ch);
       const apply = () => {
         setData((d) => ({ ...d, isExample: ch === 'coupang' ? false : d.isExample,
-          [key]: ch === 'coupang' || next.settingsFound ? next.settings : (d[key] || DEFAULT_TOSS_SETTINGS),
+          [key]: ch === 'coupang' || next.settingsFound ? { ...(d[key] || {}), ...next.settings } : (d[key] || DEFAULT_TOSS_SETTINGS),
           products: [...d.products.filter((p) => channelOf(p) !== ch), ...next.products.map((p) => ({ ...p, channel: ch }))] }));
         setNotice({ kind: 'ok', text: `${file.name}에서 ${chName} 상품 ${next.products.length}개, 규격 ${n}개를 불러왔습니다.` });
       };
@@ -1580,10 +1611,20 @@ function App() {
             <p class=${'min-w-0 flex-1 basis-60 text-xs text-pretty ' + (feeMissing ? 'font-medium text-warn' : 'text-muted')}>${feeMissing
               ? `${chName} 판매수수료율을 입력하세요. 비어 있으면 수수료 0%로 계산돼 마진이 실제보다 크게 나옵니다.`
               : '수수료율은 개당 마진과 체험단 가구매 수수료에 함께 적용됩니다. 체험단은 빈박스 발송이라 매입원가가 들어가지 않습니다.'}</p>
+            <details class="basis-full border-t border-line pt-3" open=${CATEGORIES.some(([k]) => k !== 'custom' && g.categoryFees?.[k] !== '' && g.categoryFees?.[k] != null)}>
+              <summary class="cursor-pointer text-sm font-medium">카테고리별 수수료 <span class="font-normal text-muted">· 비워 두면 기본 ${pct(num(g.feeRate), 2)} 사용</span></summary>
+              <div class="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-5">
+                ${CATEGORIES.filter(([k]) => k !== 'custom').map(([k, label]) => html`
+                  <${NumField} key=${k} id=${'catfee-' + k} label=${label + ' (VAT 포함)'} kind="pct" value=${g.categoryFees?.[k] ?? ''}
+                    hint=${`상품 ${chProducts.filter((x) => x.category === k).length}개`}
+                    onChange=${(v) => setSettings({ categoryFees: { ...(g.categoryFees || {}), [k]: v } })} />`)}
+              </div>
+              <p class="mt-2 text-xs text-muted text-pretty">상품 카드에서 카테고리를 고르면 그 카테고리 수수료로 계산합니다. 쿠팡 윙에서 상품 등록 때 카테고리를 고르면 수수료가 표시되니, 확인한 값을 부가세 포함으로 넣으세요(예: 10.6% → 11.66%). '직접 입력'은 상품마다 요율을 넣습니다.</p>
+            </details>
           </section>`}
 
           ${tab === 'analysis' ? (channel === 'coupang'
-            ? html`<${AnalysisPanel} an=${an} setAn=${setAn} calc=${{ ...data, settings: data.settings, products: chProducts }} onLink=${onLink} setConfirm=${setConfirm} setNotice=${setNotice} />`
+            ? html`<${AnalysisPanel} an=${an} setAn=${setAn} calc=${{ ...data, settings: data.settings, products: chProducts.map((p) => ({ ...p, options: p.options.map((o) => ({ ...o, _fee: feeOf(p, data.settings).rate })) })) }} onLink=${onLink} setConfirm=${setConfirm} setNotice=${setNotice} />`
             : html`
               <div id="panel-analysis" role="tabpanel" aria-labelledby="tab-analysis" class="flex flex-col items-center gap-2 rounded-xl border border-dashed border-line px-4 py-12 text-center">
                 <span class="rounded bg-soft px-2 py-0.5 text-xs font-medium text-muted">준비 중</span>
@@ -1600,7 +1641,8 @@ function App() {
                   <button type="button" class="rounded-md border border-line px-3 py-2 text-sm hover:bg-soft" onClick=${() => setQuery('')}>검색어 지우기</button>
                 </div>` : null}
               ${chProducts.length ? shown.map((p) => html`
-                <${ProductCard} key=${p.id} p=${p} settings=${g} sendLabel=${otherTo + ' 보내기'} onSend=${() => sendProduct(p)}
+                <${ProductCard} key=${p.id} p=${p} settings=${settingsFor(p, g)} fee=${feeOf(p, g)}
+                  onCategory=${(patch) => setProduct(p.id, (x) => ({ ...x, ...patch }))} sendLabel=${otherTo + ' 보내기'} onSend=${() => sendProduct(p)}
                   onRename=${(name) => setProduct(p.id, (x) => ({ ...x, name }))}
                   onEdit=${(oid) => setEditing({ pid: p.id, oid })}
                   onAdd=${() => addOption(p.id)}
@@ -1682,7 +1724,7 @@ function App() {
               <button type="button" class="rounded-md bg-accent px-3 py-2 text-sm font-medium text-accent-fg" onClick=${() => setEditing(null)}>완료</button>
             </div>
             <div class="p-5">
-              <${OptionForm} opt=${edOpt} set=${(patch) => setOption(ed.id, edOpt.id, patch)} settings=${g} idp=${'e-' + edOpt.id + '-'} pickedPrice=${pickPrice(data.priceSet || data.pricing?.coupang).price} />
+              <${OptionForm} opt=${edOpt} set=${(patch) => setOption(ed.id, edOpt.id, patch)} settings=${settingsFor(ed, data[settingsKey(channelOf(ed))] || DEFAULT_TOSS_SETTINGS)} idp=${'e-' + edOpt.id + '-'} pickedPrice=${pickPrice(data.priceSet || data.pricing?.coupang).price} />
             </div>
           </div>`}
       </${Modal}>
