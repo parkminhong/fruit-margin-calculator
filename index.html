@@ -385,14 +385,22 @@ function tossFee(t) {
   return +(rate * (t.vat === false ? 1 : 1.1)).toFixed(6);
 }
 const settingsKey = (ch) => (ch === 'toss' ? 'tossSettings' : 'settings');
-// 상품 카테고리별 판매수수료 (쿠팡). 요율은 설정의 '카테고리별 수수료'에서 VAT 포함으로 입력하고, 비어 있으면 기본 수수료율을 쓴다.
-// 토스는 카테고리와 상관없이 같은 수수료라 카테고리 요율을 쓰지 않는다. '직접 입력'은 두 판매처 모두 상품에 넣은 요율을 쓴다.
-const CATEGORIES = [['fruit', '과일'], ['veg', '채소'], ['grain', '쌀·잡곡'], ['seafood', '수산물'], ['meat', '축산물'], ['custom', '직접 입력']];
+// 상품 카테고리별 판매수수료 (쿠팡). 요율은 쿠팡 안내처럼 VAT 별도로 저장하고, 계산할 때 부가세 10%를 더한다.
+// 비어 있는 카테고리는 기본 수수료율(VAT 포함)을 쓴다. 토스는 카테고리와 상관없이 같은 수수료라 카테고리 요율을 쓰지 않고,
+// '직접 입력'(VAT 포함)은 두 판매처 모두 상품에 넣은 요율을 쓴다.
+const CATEGORIES = [
+  ['food', '일반 식품'], ['potato', '채소류 · 감자·고구마'], ['grain', '신선식품 · 쌀·잡곡류'],
+  ['fruit', '과일'], ['veg', '채소 (기타)'], ['seafood', '수산물'], ['meat', '축산물'], ['custom', '직접 입력'],
+];
+const DEFAULT_CATEGORY_RATES = { food: 0.106, potato: 0.076, grain: 0.058 }; // 쿠팡 판매수수료, VAT 별도
+const CATEGORY_ALIASES = { '채소': 'veg', '쌀·잡곡': 'grain' };
 const categoryLabel = (k) => (CATEGORIES.find((x) => x[0] === k) || [, '기본'])[1];
+const categoryRates = (g) => g.categoryRates || DEFAULT_CATEGORY_RATES;
+const withVat = (r) => +(num(r) * 1.1).toFixed(6);
 function feeOf(p, g) {
   if (p.category === 'custom' && p.customFee !== '' && p.customFee != null) return { rate: num(p.customFee), source: '직접 입력' };
-  const cat = channelOf(p) === 'coupang' && p.category && p.category !== 'custom' ? g.categoryFees?.[p.category] : '';
-  if (cat !== '' && cat != null) return { rate: num(cat), source: categoryLabel(p.category) };
+  const r = channelOf(p) === 'coupang' && p.category && p.category !== 'custom' ? categoryRates(g)[p.category] : '';
+  if (r !== '' && r != null) return { rate: withVat(r), source: categoryLabel(p.category) };
   return { rate: num(g.feeRate), source: '기본' };
 }
 const settingsFor = (p, g) => ({ ...g, feeRate: feeOf(p, g).rate });
@@ -422,7 +430,14 @@ const EXAMPLE = {
 };
 
 // 이전 버전의 단일 '정액쿠폰'은 즉시할인 쿠폰으로 옮기고, 쓰지 않는 즉시할인율·상한은 버림
-const migrate = (d) => d && ({ tossSettings: DEFAULT_TOSS_SETTINGS, ...d, products: d.products.map((p) => ({ channel: 'coupang', ...p, options: p.options.map(({ coupon, instantRate, instantCap, ...o }) =>
+const migrateSettings = (g) => {
+  if (!g || g.categoryRates || !g.categoryFees) return g;
+  const { categoryFees, ...rest } = g;
+  const rates = { ...DEFAULT_CATEGORY_RATES };
+  for (const [k, v] of Object.entries(categoryFees)) if (v !== '' && v != null) rates[k] = +(num(v) / 1.1).toFixed(6);
+  return { ...rest, categoryRates: rates };
+};
+const migrate = (d) => d && ({ tossSettings: DEFAULT_TOSS_SETTINGS, ...d, settings: migrateSettings(d.settings), products: d.products.map((p) => ({ channel: 'coupang', ...p, options: p.options.map(({ coupon, instantRate, instantCap, ...o }) =>
   ({ instantCoupon: coupon ?? 0, downloadCoupon: 0, ...o })) })) });
 
 // ───────────── 저장: 이 브라우저(localStorage) ─────────────
@@ -507,7 +522,7 @@ function parseWorkbook(buf) {
     o.periodFrom = toDateStr(o.periodFrom) || ''; o.periodTo = toDateStr(o.periodTo) || '';
     const name = String(r[idx.name] ?? '').trim() || '이름 없는 상품';
     const catLabel = catIdx >= 0 ? String(r[catIdx] ?? '').trim() : '';
-    const category = (CATEGORIES.find(([, label]) => label === catLabel) || [''])[0];
+    const category = CATEGORY_ALIASES[catLabel] || (CATEGORIES.find(([, label]) => label === catLabel) || [''])[0];
     const last = products[products.length - 1];
     if (last && last.name === name) last.options.push(o);
     else products.push({ id: uid(), name, category, options: [o] });
@@ -1611,15 +1626,22 @@ function App() {
             <p class=${'min-w-0 flex-1 basis-60 text-xs text-pretty ' + (feeMissing ? 'font-medium text-warn' : 'text-muted')}>${feeMissing
               ? `${chName} 판매수수료율을 입력하세요. 비어 있으면 수수료 0%로 계산돼 마진이 실제보다 크게 나옵니다.`
               : '수수료율은 개당 마진과 체험단 가구매 수수료에 함께 적용됩니다. 체험단은 빈박스 발송이라 매입원가가 들어가지 않습니다.'}</p>
-            <details class="basis-full border-t border-line pt-3" open=${CATEGORIES.some(([k]) => k !== 'custom' && g.categoryFees?.[k] !== '' && g.categoryFees?.[k] != null)}>
-              <summary class="cursor-pointer text-sm font-medium">카테고리별 수수료 <span class="font-normal text-muted">· 비워 두면 기본 ${pct(num(g.feeRate), 2)} 사용</span></summary>
-              <div class="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-5">
-                ${CATEGORIES.filter(([k]) => k !== 'custom').map(([k, label]) => html`
-                  <${NumField} key=${k} id=${'catfee-' + k} label=${label + ' (VAT 포함)'} kind="pct" value=${g.categoryFees?.[k] ?? ''}
-                    hint=${`상품 ${chProducts.filter((x) => x.category === k).length}개`}
-                    onChange=${(v) => setSettings({ categoryFees: { ...(g.categoryFees || {}), [k]: v } })} />`)}
+            <details class="basis-full border-t border-line pt-3">
+              <summary class="cursor-pointer text-sm font-medium">카테고리별 수수료 <span class="font-normal text-muted">· 쿠팡 안내 요율(VAT 별도)로 입력, 비워 두면 기본 ${pct(num(g.feeRate), 2)} 사용</span></summary>
+              <div class="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-4">
+                ${CATEGORIES.filter(([k]) => k !== 'custom').map(([k, label]) => {
+                  const r = categoryRates(g)[k];
+                  const n = chProducts.filter((x) => x.category === k).length;
+                  return html`
+                  <${NumField} key=${k} id=${'catfee-' + k} label=${label} kind="pct" value=${r ?? ''}
+                    hint=${(r === '' || r == null ? `비어 있음 · 기본 ${pct(num(g.feeRate), 2)}` : `부가세 포함 ${pct(withVat(r), 2)}`) + ` · 상품 ${n}개`}
+                    onChange=${(v) => setSettings({ categoryRates: { ...categoryRates(g), [k]: v } })} />`;
+                })}
               </div>
-              <p class="mt-2 text-xs text-muted text-pretty">상품 카드에서 카테고리를 고르면 그 카테고리 수수료로 계산합니다. 쿠팡 윙에서 상품 등록 때 카테고리를 고르면 수수료가 표시되니, 확인한 값을 부가세 포함으로 넣으세요(예: 10.6% → 11.66%). '직접 입력'은 상품마다 요율을 넣습니다.</p>
+              <div class="mt-2 flex flex-wrap items-center gap-3">
+                <p class="min-w-0 flex-1 basis-72 text-xs text-muted text-pretty">상품 카드에서 카테고리를 고르면 그 카테고리 요율에 부가세 10%를 더해 계산합니다(예: 10.6% → 11.66%). 기본값은 일반 식품 10.6%, 채소류·감자·고구마 7.6%, 신선식품·쌀·잡곡류 5.8%입니다. '직접 입력'은 상품마다 부가세 포함 요율을 넣습니다.</p>
+                <button type="button" class="whitespace-nowrap rounded-md border border-line px-3 py-1.5 text-sm hover:bg-soft" onClick=${() => setSettings({ categoryRates: { ...DEFAULT_CATEGORY_RATES } })}>기본값으로 되돌리기</button>
+              </div>
             </details>
           </section>`}
 
