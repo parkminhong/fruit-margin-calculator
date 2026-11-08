@@ -742,11 +742,32 @@ function Summary({ t }) {
     </section>`;
 }
 
-function ProductCard({ p, settings, fee, onRename, onEdit, onAdd, onDelete, onSend, sendLabel, onCategory }) {
+function ProductCard({ p, settings, fee, onRename, onEdit, onAdd, onDelete, onSend, sendLabel, onCategory, onToggle, move }) {
   const t = calcTotals(p.options, settings);
+  const open = !p.collapsed;
   return html`
-    <section class="rounded-xl border border-line bg-surface">
-      <header class="flex flex-wrap items-center gap-x-4 gap-y-2 border-b border-line px-4 py-3">
+    <section class=${'rounded-xl border bg-surface ' + (move.over ? 'border-accent ring-2 ring-accent/30' : 'border-line') + (move.dragging ? ' opacity-50' : '')}
+      onDragOver=${move.onDragOver} onDragLeave=${move.onDragLeave} onDrop=${move.onDrop}>
+      <header class=${'flex flex-wrap items-center gap-x-4 gap-y-2 px-4 py-3 ' + (open ? 'border-b border-line' : '')}>
+        <div class="flex items-center gap-1">
+          ${move.enabled ? html`
+            <span draggable="true" onDragStart=${move.onDragStart} onDragEnd=${move.onDragEnd} title="끌어서 순서 바꾸기"
+              class="flex h-8 w-5 cursor-grab items-center justify-center rounded text-muted hover:bg-soft hover:text-fg active:cursor-grabbing" aria-hidden="true">
+              <svg viewBox="0 0 10 16" class="h-4 w-2.5" fill="currentColor"><circle cx="2.5" cy="3" r="1.4"/><circle cx="7.5" cy="3" r="1.4"/><circle cx="2.5" cy="8" r="1.4"/><circle cx="7.5" cy="8" r="1.4"/><circle cx="2.5" cy="13" r="1.4"/><circle cx="7.5" cy="13" r="1.4"/></svg>
+            </span>
+            <div class="flex flex-col">
+              <button type="button" aria-label=${p.name + ' 위로 옮기기'} disabled=${!move.canUp} onClick=${move.up}
+                class="flex h-4 w-6 items-center justify-center rounded text-muted hover:bg-soft hover:text-fg disabled:opacity-30">
+                <svg aria-hidden="true" viewBox="0 0 12 8" class="h-2 w-3" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M2 6.5 6 2.5l4 4"/></svg></button>
+              <button type="button" aria-label=${p.name + ' 아래로 옮기기'} disabled=${!move.canDown} onClick=${move.down}
+                class="flex h-4 w-6 items-center justify-center rounded text-muted hover:bg-soft hover:text-fg disabled:opacity-30">
+                <svg aria-hidden="true" viewBox="0 0 12 8" class="h-2 w-3" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M2 1.5 6 5.5l4-4"/></svg></button>
+            </div>` : null}
+          <button type="button" aria-expanded=${open} aria-controls=${'opts-' + p.id} aria-label=${(open ? '규격 접기: ' : '규격 펴기: ') + p.name} onClick=${onToggle}
+            class="flex size-8 items-center justify-center rounded-md text-muted hover:bg-soft hover:text-fg">
+            <svg aria-hidden="true" viewBox="0 0 12 12" class=${'size-3 ' + (open ? 'rotate-90' : '')} fill="currentColor"><path d="M4 2l5 4-5 4z"/></svg>
+          </button>
+        </div>
         <input aria-label="상품명" class="min-w-0 flex-1 basis-64 bg-transparent text-base font-semibold outline-none rounded px-1 -mx-1 hover:bg-soft focus:bg-soft"
           value=${p.name} onChange=${(e) => onRename(e.target.value)} />
         <div class="flex items-center gap-2 text-sm">
@@ -759,14 +780,14 @@ function ProductCard({ p, settings, fee, onRename, onEdit, onAdd, onDelete, onSe
           ${p.category === 'custom' ? html`<div class="w-28"><${NumField} id=${'cf-' + p.id} label="직접 수수료" kind="pct" value=${p.customFee ?? ''} onChange=${(v) => onCategory({ customFee: v })} /></div>` : null}
           <span class="whitespace-nowrap text-xs tabular-nums text-muted" title="이 상품에 적용되는 판매수수료율 (VAT 포함)">수수료 ${pct(fee.rate, 2)} · ${fee.source}</span>
         </div>
-        <span class="text-sm tabular-nums">순수익 <b class=${tone(t.finalNet)}>${won(t.finalNet)}</b></span>
+        <span class="text-sm tabular-nums">${open ? null : html`<span class="text-muted">규격 ${p.options.length}개 · </span>`}순수익 <b class=${tone(t.finalNet)}>${won(t.finalNet)}</b></span>
         <div class="flex gap-2">
           <button type="button" class="rounded-md border border-line px-2.5 py-1.5 text-sm hover:bg-soft" onClick=${onAdd}>규격 추가</button>
           <button type="button" class="rounded-md border border-line px-2.5 py-1.5 text-sm hover:bg-soft" onClick=${onSend}>${sendLabel}</button>
           <button type="button" class="rounded-md px-2.5 py-1.5 text-sm text-muted hover:bg-soft hover:text-neg" onClick=${onDelete}>상품 삭제</button>
         </div>
       </header>
-      <div class="relative overflow-x-auto">
+      <div id=${'opts-' + p.id} hidden=${!open} class="relative overflow-x-auto">
         <table class="w-full min-w-[760px] text-sm tabular-nums">
           <thead class="text-xs text-muted">
             <tr class="text-right [&>th]:px-3 [&>th]:py-2 [&>th]:font-medium">
@@ -1386,6 +1407,8 @@ function App() {
   const [tab, setTab] = useState('list');
   const [channel, setChannel] = useState('coupang');
   const [query, setQuery] = useState('');
+  const [drag, setDrag] = useState({ id: null, over: null });
+  const dragRef = useRef(null); // 끌고 있는 상품 id (렌더를 기다리지 않고 바로 읽기 위해)
   const [sideOpen, setSideOpen] = useState(() => { try { return localStorage.getItem(SIDE_KEY) === 'open'; } catch (e) { return false; } });
   useEffect(() => { try { localStorage.setItem(SIDE_KEY, sideOpen ? 'open' : 'closed'); } catch (e) {} }, [sideOpen]);
   // 패널 너비: 왼쪽 가장자리를 끌어서 조절, 마지막 너비 기억. 본문이 너무 좁아지지 않게 화면 너비에 맞춰 제한
@@ -1473,6 +1496,20 @@ function App() {
       setConfirm({ title: `${otherName}에 같은 이름의 상품이 있습니다`, body: `"${p.name}" 상품이 이미 ${otherName}에 있습니다. 하나 더 복사할까요? 기존 상품은 그대로 둡니다.`, action: '하나 더 보내기', tone: 'accent', onConfirm: doSend });
     else doSend();
   };
+
+  // 상품 순서 바꾸기: 같은 판매처 안에서 옮기되, 다른 판매처 상품의 자리는 그대로 둔다
+  const moveProduct = (id, targetId, place) => update((d) => {
+    const list = [...d.products];
+    const from = list.findIndex((x) => x.id === id);
+    if (from < 0 || id === targetId) return d;
+    const [item] = list.splice(from, 1);
+    let to = list.findIndex((x) => x.id === targetId);
+    if (to < 0) return d;
+    if (place === 'after') to += 1;
+    list.splice(to, 0, item);
+    return { ...d, products: list };
+  });
+  const setAllCollapsed = (collapsed) => update((d) => ({ ...d, products: d.products.map((x) => (channelOf(x) === channel ? { ...x, collapsed } : x)) }));
 
   const addProduct = (seed) => {
     const o = emptyOption(seed ? { ...seed, id: uid() } : {});
@@ -1656,14 +1693,32 @@ function App() {
           : tab === 'list' ? html`
             <div id="panel-list" role="tabpanel" aria-labelledby="tab-list" class="flex flex-col gap-4">
               <${Summary} t=${totals} />
-              ${query.trim() && chProducts.length ? html`<p class="text-sm text-muted" aria-live="polite">"${query.trim()}" 검색 결과 ${shown.length}개 / 전체 ${chProducts.length}개 · 위 합계는 전체 기준입니다</p>` : null}
+              ${chProducts.length ? html`
+                <div class="flex flex-wrap items-center gap-x-3 gap-y-2">
+                  <p class="min-w-0 flex-1 text-sm text-muted" aria-live="polite">${query.trim()
+                    ? `"${query.trim()}" 검색 결과 ${shown.length}개 / 전체 ${chProducts.length}개 · 위 합계는 전체 기준입니다 · 검색 중에는 순서를 바꿀 수 없습니다`
+                    : `${chName} 상품 ${chProducts.length}개 · 왼쪽 손잡이를 끌거나 ▲▼로 순서를 바꿉니다`}</p>
+                  <button type="button" class="rounded-md border border-line px-2.5 py-1.5 text-sm hover:bg-soft" onClick=${() => setAllCollapsed(true)}>모두 접기</button>
+                  <button type="button" class="rounded-md border border-line px-2.5 py-1.5 text-sm hover:bg-soft" onClick=${() => setAllCollapsed(false)}>모두 펴기</button>
+                </div>` : null}
               ${query.trim() && chProducts.length && !shown.length ? html`
                 <div class="flex flex-col items-center gap-3 rounded-xl border border-dashed border-line px-4 py-10 text-center">
                   <p class="text-sm text-muted">"${query.trim()}"에 맞는 ${chName} 상품이 없습니다.</p>
                   <button type="button" class="rounded-md border border-line px-3 py-2 text-sm hover:bg-soft" onClick=${() => setQuery('')}>검색어 지우기</button>
                 </div>` : null}
-              ${chProducts.length ? shown.map((p) => html`
+              ${chProducts.length ? shown.map((p, i) => html`
                 <${ProductCard} key=${p.id} p=${p} settings=${settingsFor(p, g)} fee=${feeOf(p, g)}
+                  onToggle=${() => setProduct(p.id, (x) => ({ ...x, collapsed: !x.collapsed }))}
+                  move=${{
+                    enabled: !query.trim(), canUp: i > 0, canDown: i < shown.length - 1,
+                    up: () => moveProduct(p.id, shown[i - 1].id, 'before'), down: () => moveProduct(p.id, shown[i + 1].id, 'after'),
+                    dragging: drag.id === p.id, over: drag.id && drag.id !== p.id && drag.over === p.id,
+                    onDragStart: (e) => { e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', p.id); dragRef.current = p.id; setDrag({ id: p.id, over: null }); },
+                    onDragEnd: () => { dragRef.current = null; setDrag({ id: null, over: null }); },
+                    onDragOver: (e) => { const id = dragRef.current; if (!id || id === p.id) return; e.preventDefault(); e.dataTransfer.dropEffect = 'move'; if (drag.over !== p.id) setDrag((s) => ({ ...s, over: p.id })); },
+                    onDragLeave: (e) => { if (!e.currentTarget.contains(e.relatedTarget)) setDrag((s) => (s.over === p.id ? { ...s, over: null } : s)); },
+                    onDrop: (e) => { e.preventDefault(); const id = dragRef.current; if (id && id !== p.id) moveProduct(id, p.id, shown.findIndex((x) => x.id === id) < i ? 'after' : 'before'); dragRef.current = null; setDrag({ id: null, over: null }); },
+                  }}
                   onCategory=${(patch) => setProduct(p.id, (x) => ({ ...x, ...patch }))} sendLabel=${otherTo + ' 보내기'} onSend=${() => sendProduct(p)}
                   onRename=${(name) => setProduct(p.id, (x) => ({ ...x, name }))}
                   onEdit=${(oid) => setEditing({ pid: p.id, oid })}
