@@ -294,6 +294,28 @@ function segmentsOf(o) {
   return segs.map((sg, i) => ({ ...sg, to: i < segs.length - 1 ? (segs[i + 1].from ? addDays(segs[i + 1].from, -1) : '') : (o.periodTo || '') }));
 }
 
+// 가격 구간 [from, to](빈 값은 열린 끝)에 해당하는 쿠팡 판매량을 상품별 판매분석 자료에서 구한다.
+// 상품별 파일 기간이 구간에 다 들어가면 그대로, 일부만 걸치면 기간별(일별) 파일의 판매 비중으로(없으면 일수로) 나눈다.
+function salesFromInsights(an, ids, from, to) {
+  let qty = 0, estimated = false, files = 0;
+  for (const b of an?.batches || []) {
+    const a = !from || from < b.from ? b.from : from, z = !to || to > b.to ? b.to : to;
+    if (a > z) continue;
+    const q = b.rows.filter((r) => ids.includes(r.optionId)).reduce((s2, r) => s2 + r.qty, 0);
+    files++;
+    if (a === b.from && z === b.to) { qty += q; continue; }
+    estimated = true;
+    let part = 0, all = 0, covered = 0;
+    for (let d = b.from; d <= b.to; d = addDays(d, 1)) {
+      const row = an.daily?.[d];
+      if (row) { covered++; all += row.qty; if (d >= a && d <= z) part += row.qty; }
+    }
+    const share = covered && all > 0 ? part / all : daysBetween(a, z) / daysBetween(b.from, b.to);
+    qty += q * share;
+  }
+  return { qty: Math.round(qty), estimated, files };
+}
+
 // 그 달에 적용할 단가: 연결된 규격의 가격 구간들을 그 달과 겹치는 일수로 가중평균한다.
 // 날짜가 빠진 구간이 있으면 일수를 알 수 없어 구간별 판매수(계산기 총판매개수)로 가중평균한다.
 function unitFor(blocks, m, fallbackFee = 0) {
@@ -617,7 +639,7 @@ function Line({ label, value, strong, sub, className = '' }) {
 }
 
 // ───────────── 규격 편집 폼 (편집 패널 · 빠른 계산 공용) ─────────────
-function OptionForm({ opt, set, settings, idp, pickedPrice }) {
+function OptionForm({ opt, set, settings, idp, pickedPrice, insights, idShared }) {
   const c = calcRow(opt, settings);
   const f = (key, label, kind, hint) => html`<${NumField} id=${idp + key} label=${label} kind=${kind} hint=${hint}
     value=${opt[key]} onChange=${(v) => set({ [key]: v })} error=${key === 'trialCount' || key === 'totalSales' ? c.qtyError : null} />`;
@@ -703,7 +725,7 @@ function OptionForm({ opt, set, settings, idp, pickedPrice }) {
           </dl>
         </section>
       </div>
-      ${idp !== 'q-' ? html`<div class="min-w-0 md:col-span-2"><${PriceHistory} opt=${opt} set=${set} settings=${settings} idp=${idp} /></div>` : null}
+      ${idp !== 'q-' ? html`<div class="min-w-0 md:col-span-2"><${PriceHistory} opt=${opt} set=${set} settings=${settings} idp=${idp} insights=${insights} idShared=${idShared} /></div>` : null}
     </div>`;
 }
 
@@ -870,8 +892,9 @@ function CellNum({ id, label, value, onChange, unit }) {
     </span>`;
 }
 
-function PriceHistory({ opt, set, settings, idp }) {
+function PriceHistory({ opt, set, settings, idp, insights, idShared = 0 }) {
   const [draft, setDraft] = useState(null);
+  const [fill, setFill] = useState(null); // 판매분석 자료로 채우기 미리보기
   const [askDel, setAskDel] = useState(null);
   const hist = opt.priceHistory || [];
   const marginOf = (v) => calcRow({ ...opt, ...v }, settings);
@@ -932,6 +955,54 @@ function PriceHistory({ opt, set, settings, idp }) {
             <td class=${tone(sumNet)}>${sumNet == null ? '–' : wonShort(sumNet)}</td><td colspan="2" class="text-left text-xs font-normal text-muted">상품 표의 이 규격 순수익과 같습니다</td></tr></tfoot>` : null}
         </table>
       </div>
+      ${(() => {
+        if (!insights) return null;
+        const ids = idsOf(opt), batches = insights.batches || [];
+        const why = !batches.length ? '월별 분석에 상품별 판매분석 파일을 먼저 올려 주세요'
+          : !ids.length ? '쿠팡 옵션 ID가 연결되어 있지 않습니다 (위 쿠팡 연결 칸 또는 월별 분석의 옵션 연결)'
+          : idShared ? `같은 쿠팡 옵션 ID가 연결된 다른 규격이 ${idShared}개 있어 판매량이 겹칩니다. 상품 목록 위 '가격 묶음 합치기'로 먼저 합쳐 주세요` : '';
+        const preview = () => {
+          const segs = segmentsOf(opt);
+          setFill(segs.map((sg, i) => {
+            const key = i < segs.length - 1 ? hist[i]?.id : 'cur';
+            const undated = i > 0 && !sg.from;
+            return { key, label: i < segs.length - 1 ? '이전 가격' : '현재 가격', from: sg.from, to: sg.to, undated,
+              ...(undated ? { qty: null } : salesFromInsights(insights, ids, sg.from, sg.to)), now: num(i < segs.length - 1 ? hist[i]?.sales?.totalSales : opt.totalSales) };
+          }));
+        };
+        const apply = () => {
+          const byKey = Object.fromEntries(fill.filter((f) => f.qty != null && f.files).map((f) => [f.key, f.qty]));
+          set({ ...('cur' in byKey ? { totalSales: byKey.cur } : {}),
+            priceHistory: hist.map((e) => (e.id in byKey ? { ...e, sales: { trialPrice: opt.trialPrice ?? '', ...(e.sales || {}), totalSales: byKey[e.id] } } : e)) });
+          setFill(null);
+        };
+        return html`
+          <div class="flex flex-col gap-2 rounded-lg border border-line p-3">
+            <div class="flex flex-wrap items-center gap-3">
+              <button type="button" disabled=${!!why} onClick=${preview}
+                class="rounded-md border border-line px-3 py-1.5 text-sm hover:bg-soft disabled:opacity-50">판매분석 자료로 판매량 채우기</button>
+              <p class="min-w-0 flex-1 basis-60 text-xs text-muted text-pretty">${why || `쿠팡 옵션 ${ids.join(', ')}의 판매량을 상품별 판매분석 자료(${batches.map((b) => `${shortDate(b.from)}~${shortDate(b.to)}`).join(', ')})에서 가격 구간 날짜에 맞춰 가져옵니다.`}</p>
+            </div>
+            ${fill ? html`
+              <div class="flex flex-col gap-2 rounded-md bg-soft p-3 text-sm">
+                <ul class="flex flex-col gap-1 tabular-nums">
+                  ${fill.slice().reverse().map((f) => html`
+                    <li key=${f.key} class="flex flex-wrap items-baseline gap-x-2">
+                      <span class="font-medium">${f.label}</span>
+                      <span class="text-xs text-muted">${f.from ? shortDate(f.from) : '처음'} ~ ${f.to ? shortDate(f.to) : '지금'}</span>
+                      <span class="ml-auto">${f.undated ? html`<span class="text-warn">시작일이 없어 가져올 수 없음</span>`
+                        : !f.files ? html`<span class="text-muted">이 기간의 판매분석 자료 없음</span>`
+                        : html`${cnt(f.now)} → <b>${cnt(f.qty)}</b>${f.estimated ? html` <span class="rounded bg-warn/15 px-1 text-xs text-warn">추정</span>` : null}`}</span>
+                    </li>`)}
+                </ul>
+                <p class="text-xs text-muted text-pretty">쿠팡 판매량(취소 제외, 체험단 가구매 포함)을 총판매개수로 넣습니다. 체험단개수·광고비·CS는 바뀌지 않습니다. '추정'은 판매분석 파일 기간이 구간 날짜에 걸쳐 있어, 기간별 파일의 날짜별 판매 비중으로 나눈 값입니다.</p>
+                <div class="flex justify-end gap-2">
+                  <button type="button" class="rounded-md border border-line px-3 py-1.5 text-sm hover:bg-surface" onClick=${() => setFill(null)}>취소</button>
+                  <button type="button" disabled=${!fill.some((f) => f.qty != null && f.files)} class="rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-accent-fg disabled:opacity-50" onClick=${apply}>판매량 채우기</button>
+                </div>
+              </div>` : null}
+          </div>`;
+      })()}
       <p class="text-xs text-muted text-pretty">구간마다 그 가격으로 팔린 판매량·체험단·광고비·CS를 넣으면 구간별 순수익이 계산되고, 모두 더한 값이 상품 표와 전체 합계에 들어갑니다. 현재 가격 줄은 위 '판매 · 체험단', '비용' 칸과 같은 값입니다.</p>
       ${askDel && hasSales(hist.find((x) => x.id === askDel)?.sales) ? html`<p class="text-xs text-warn">이 구간의 판매 실적도 함께 지워져 순수익 합계가 바뀝니다.</p>` : null}
       ${draft ? html`
@@ -2002,7 +2073,8 @@ function App() {
               <button type="button" class="rounded-md bg-accent px-3 py-2 text-sm font-medium text-accent-fg" onClick=${() => setEditing(null)}>완료</button>
             </div>
             <div class="p-5">
-              <${OptionForm} opt=${edOpt} set=${(patch) => setOption(ed.id, edOpt.id, patch)} settings=${settingsFor(ed, data[settingsKey(channelOf(ed))] || DEFAULT_TOSS_SETTINGS)} idp=${'e-' + edOpt.id + '-'} pickedPrice=${pickPrice(data.priceSet || data.pricing?.coupang).price} />
+              <${OptionForm} opt=${edOpt} insights=${channelOf(ed) === 'coupang' ? an : null}
+                idShared=${(() => { const mine = idsOf(edOpt); return mine.length ? data.products.filter((x) => channelOf(x) === 'coupang').flatMap((x) => x.options).filter((o) => o.id !== edOpt.id && idsOf(o).some((i) => mine.includes(i))).length : 0; })()} set=${(patch) => setOption(ed.id, edOpt.id, patch)} settings=${settingsFor(ed, data[settingsKey(channelOf(ed))] || DEFAULT_TOSS_SETTINGS)} idp=${'e-' + edOpt.id + '-'} pickedPrice=${pickPrice(data.priceSet || data.pricing?.coupang).price} />
             </div>
           </div>`}
       </${Modal}>
