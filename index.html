@@ -856,6 +856,20 @@ function ProductCard({ p, settings, fee, onRename, onEdit, onCopy, onAdd, onDele
 }
 
 // ───────────── 가격 변동 기록 (규격 편집 창) ─────────────
+// 표 칸에 넣는 작은 숫자 입력 (입력하는 동안은 쓴 그대로 두고, 숫자만 읽는다)
+function CellNum({ id, label, value, onChange, unit }) {
+  const [d, setD] = useState(null);
+  const shown = d ?? (value === '' || value == null ? '' : num(value).toLocaleString('ko-KR'));
+  return html`
+    <span class="inline-flex items-center rounded border border-line bg-surface px-1.5 focus-within:border-accent">
+      <input id=${id} aria-label=${label} type="text" inputmode="numeric" autocomplete="off" value=${shown}
+        class="w-16 min-w-0 bg-transparent py-1 text-right text-sm tabular-nums outline-none"
+        onFocus=${() => setD(shown)} onBlur=${() => setD(null)}
+        onChange=${(e) => { setD(e.target.value); const c = e.target.value.replace(/[^0-9.\-]/g, ''); onChange(c === '' || c === '-' ? '' : parseFloat(c)); }} />
+      ${unit ? html`<span class="whitespace-nowrap pl-0.5 text-xs text-muted">${unit}</span>` : null}
+    </span>`;
+}
+
 function PriceHistory({ opt, set, settings, idp }) {
   const [draft, setDraft] = useState(null);
   const [askDel, setAskDel] = useState(null);
@@ -872,40 +886,53 @@ function PriceHistory({ opt, set, settings, idp }) {
     setDraft(null);
   };
   const setEntry = (id, patch) => set({ priceHistory: hist.map((e) => (e.id === id ? { ...e, ...patch } : e)).sort((a, b) => (a.from || '') < (b.from || '') ? -1 : 1) });
-  const row = (key, label, from, v, memo, sales, actions) => {
-    const c = marginOf(v);
+  // 구간 한 줄: 가격 + 그 가격으로 팔린 실적(판매량·체험단·광고비·CS)과 순수익
+  const row = (key, label, from, v, memo, sales, setSales, actions) => {
+    const c = calcRow({ ...opt, ...pickKeys(v, PRICE_FIELDS), ...pickKeys(sales, SALES_FIELDS), trialPrice: sales?.trialPrice ?? opt.trialPrice }, settings);
+    const cell = (k, label2, unit) => html`<${CellNum} id=${idp + key + '-' + k} label=${label2} unit=${unit} value=${sales?.[k] ?? ''} onChange=${(x) => setSales({ [k]: x })} />`;
     return html`
       <tr key=${key} class="border-t border-line text-right align-top [&>td]:px-2 [&>td]:py-2">
         <td class="text-left">${label}<div class="mt-1 w-36">${from}</div></td>
         <td>${wonShort(num(v.cost) + num(v.extraCost))}</td>
-        <td>${wonShort(v.targetPay)}</td>
-        <td>${wonShort(num(v.instantCoupon) + num(v.downloadCoupon))}</td>
+        <td>${wonShort(v.targetPay)}<div class="text-xs text-muted">쿠폰 ${wonShort(num(v.instantCoupon) + num(v.downloadCoupon))}</div></td>
         <td><span class=${tone(c.margin)}>${wonShort(c.margin)}</span><div class="text-xs text-muted">${pct(c.marginRate)}</div></td>
-        <td class="max-w-[10rem] text-left text-xs text-muted">${[v.supplier, memo].filter(Boolean).join(' · ') || '–'}${sales ? html`<div class="text-fg">실적 ${cnt(num(sales.totalSales))}${num(sales.adCost) ? ' · 광고 ' + wonShort(sales.adCost) : ''}</div>` : null}</td>
+        <td><div class="flex flex-col items-end gap-1">${cell('totalSales', label2text(key) + ' 총판매개수', '개')}${cell('trialCount', label2text(key) + ' 체험단개수', '체험')}</div></td>
+        <td><div class="flex flex-col items-end gap-1">${cell('adCost', label2text(key) + ' 광고비', '원')}${cell('cs', label2text(key) + ' CS', 'CS')}</div></td>
+        <td class="font-semibold">${c.qtyError ? html`<span class="rounded bg-warn/15 px-1.5 py-0.5 text-xs font-medium text-warn">수량 확인</span>` : html`<span class=${tone(c.finalNet)}>${wonShort(c.finalNet)}</span>`}</td>
+        <td class="max-w-[9rem] text-left text-xs text-muted">${[v.supplier, memo].filter(Boolean).join(' · ') || '–'}</td>
         <td class="whitespace-nowrap">${actions}</td>
       </tr>`;
   };
+  const label2text = (key) => (key === 'cur' ? '현재 가격' : '이전 가격 ' + (hist.find((e) => e.id === key)?.from || ''));
+  const setEntrySales = (id, patch) => set({ priceHistory: hist.map((e) => (e.id === id ? { ...e, sales: { trialPrice: opt.trialPrice ?? '', ...(e.sales || {}), ...patch } } : e)) });
+  const allRows = rowsOf(opt).map((r) => calcRow(r, settings));
+  const sumUnits = rowsOf(opt).reduce((a, r) => a + num(r.totalSales), 0);
+  const sumNet = allRows.some((x) => x.finalNet == null) ? null : allRows.reduce((a, x) => a + x.finalNet, 0);
   return html`
     <fieldset class="flex min-w-0 flex-col gap-3 border-t border-line pt-5">
       <legend class="sr-only">가격 변동 기록</legend>
       <h3 class="text-sm font-semibold">가격 변동 기록 <span class="font-normal text-muted">· 원가·판매가·쿠폰이 바뀐 날을 남깁니다</span></h3>
       <div class="relative overflow-x-auto rounded-lg border border-line">
-        <table class="w-full min-w-[640px] text-sm tabular-nums">
+        <table class="w-full min-w-[880px] text-sm tabular-nums [&_th]:whitespace-nowrap">
           <thead class="bg-soft text-xs text-muted"><tr class="text-right [&>th]:px-2 [&>th]:py-2 [&>th]:font-medium">
-            <th class="text-left">구간 · 시작일</th><th>원가(+추가)</th><th>결제금액</th><th>쿠폰</th><th>개당 마진</th><th class="text-left">산지 · 메모</th><th><span class="sr-only">관리</span></th></tr></thead>
+            <th class="text-left">구간 · 시작일</th><th>원가(+추가)</th><th>결제금액</th><th>개당 마진</th><th>판매 · 체험단</th><th>광고비 · CS</th><th>순수익</th><th class="text-left">산지 · 메모</th><th><span class="sr-only">관리</span></th></tr></thead>
           <tbody>
             ${row('cur', html`<b>현재 가격</b>`, html`<${TextField} id=${idp + 'pfrom'} type="date" label="" value=${opt.priceFrom || ''} onChange=${(v) => set({ priceFrom: v })} />`,
-              opt, opt.priceMemo, null, null)}
+              opt, opt.priceMemo, opt, (patch) => set(patch), null)}
             ${hist.slice().reverse().map((e) => row(e.id, html`<span class="text-muted">이전 가격</span>`,
               html`<${TextField} id=${idp + 'h-' + e.id} type="date" label="" value=${e.from || ''} onChange=${(v) => setEntry(e.id, { from: v })} />`,
-              e, e.memo, hasSales(e.sales) ? e.sales : null,
+              e, e.memo, e.sales || null, (patch) => setEntrySales(e.id, patch),
               askDel === e.id
                 ? html`<button type="button" class="rounded bg-neg px-2 py-1 text-xs font-medium text-white" onClick=${() => { set({ priceHistory: hist.filter((x) => x.id !== e.id) }); setAskDel(null); }}>삭제 확인</button>
                     <button type="button" class="rounded px-2 py-1 text-xs text-muted hover:bg-soft" onClick=${() => setAskDel(null)}>취소</button>`
                 : html`<button type="button" class="rounded px-2 py-1 text-xs text-muted hover:bg-soft hover:text-neg" onClick=${() => setAskDel(e.id)}>삭제</button>`))}
           </tbody>
+          ${hist.length ? html`<tfoot><tr class="border-t-2 border-line bg-soft text-right font-semibold [&>td]:px-2 [&>td]:py-2">
+            <td class="text-left">전체 구간 합계</td><td></td><td></td><td></td><td>${cnt(sumUnits)}</td><td></td>
+            <td class=${tone(sumNet)}>${sumNet == null ? '–' : wonShort(sumNet)}</td><td colspan="2" class="text-left text-xs font-normal text-muted">상품 표의 이 규격 순수익과 같습니다</td></tr></tfoot>` : null}
         </table>
       </div>
+      <p class="text-xs text-muted text-pretty">구간마다 그 가격으로 팔린 판매량·체험단·광고비·CS를 넣으면 구간별 순수익이 계산되고, 모두 더한 값이 상품 표와 전체 합계에 들어갑니다. 현재 가격 줄은 위 '판매 · 체험단', '비용' 칸과 같은 값입니다.</p>
       ${askDel && hasSales(hist.find((x) => x.id === askDel)?.sales) ? html`<p class="text-xs text-warn">이 구간의 판매 실적도 함께 지워져 순수익 합계가 바뀝니다.</p>` : null}
       ${draft ? html`
         <div class="flex flex-col gap-3 rounded-lg border border-accent/40 bg-accent/5 p-3">
