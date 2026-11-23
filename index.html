@@ -768,7 +768,7 @@ function Summary({ t }) {
     </section>`;
 }
 
-function ProductCard({ p, settings, fee, onRename, onEdit, onAdd, onDelete, onSend, sendLabel, onCategory, onToggle, move }) {
+function ProductCard({ p, settings, fee, onRename, onEdit, onCopy, onAdd, onDelete, onSend, sendLabel, onCategory, onToggle, move }) {
   const t = calcTotals(rowsOfAll(p.options), settings);
   const open = !p.collapsed;
   return html`
@@ -794,7 +794,7 @@ function ProductCard({ p, settings, fee, onRename, onEdit, onAdd, onDelete, onSe
             <svg aria-hidden="true" viewBox="0 0 12 12" class=${'size-3 ' + (open ? 'rotate-90' : '')} fill="currentColor"><path d="M4 2l5 4-5 4z"/></svg>
           </button>
         </div>
-        <input aria-label="상품명" class="min-w-0 flex-1 basis-64 bg-transparent text-base font-semibold outline-none rounded px-1 -mx-1 hover:bg-soft focus:bg-soft"
+        <input aria-label="상품명" placeholder="상품명을 입력하세요" class="min-w-0 flex-1 basis-64 placeholder:text-warn bg-transparent text-base font-semibold outline-none rounded px-1 -mx-1 hover:bg-soft focus:bg-soft"
           value=${p.name} onChange=${(e) => onRename(e.target.value)} />
         <div class="flex items-center gap-2 text-sm">
           <label class="sr-only" for=${'cat-' + p.id}>카테고리</label>
@@ -845,7 +845,8 @@ function ProductCard({ p, settings, fee, onRename, onEdit, onAdd, onDelete, onSe
                   <td>${wonShort(cs.reduce((a, x) => a + x.adCost, 0))}</td>
                   <td class=${'font-semibold ' + tone(net)}>${net == null ? '–' : wonShort(net)}</td>
                   <td><button type="button" class="whitespace-nowrap rounded px-2 py-1 text-xs text-muted hover:bg-line hover:text-fg"
-                    onClick=${(e) => { e.stopPropagation(); onEdit(o.id); }}>편집</button></td>
+                    onClick=${(e) => { e.stopPropagation(); onEdit(o.id); }}>편집</button><button type="button" aria-label=${(o.option || '규격') + ' 복사해서 추가'}
+                    class="whitespace-nowrap rounded px-2 py-1 text-xs text-muted hover:bg-line hover:text-fg" onClick=${(e) => { e.stopPropagation(); onCopy(o.id); }}>복사</button></td>
                 </tr>`;
             })}
           </tbody>
@@ -1545,7 +1546,13 @@ function App() {
     document.addEventListener('keydown', onKey);
     return () => document.removeEventListener('keydown', onKey);
   }, [sideOpen]);
-  const [editing, setEditing] = useState(null); // {pid, oid}
+  const [editing, setEditing] = useState(null); // {pid, oid, focus}
+  // 편집 창이 열리면 새 상품은 상품명, 새 규격·복사한 규격은 규격 칸에 커서를 두고 전체 선택
+  useEffect(() => {
+    if (!editing?.focus) return;
+    const t = setTimeout(() => { const el = document.getElementById(editing.focus === 'name' ? 'edit-pname' : 'edit-option'); if (el) { el.focus(); el.select(); } }, 60);
+    return () => clearTimeout(t);
+  }, [editing?.oid, editing?.focus]);
   const [confirm, setConfirm] = useState(null);
   const [notice, setNotice] = useState(null); // {kind, text}
   const [quick, setQuick] = useState(() => emptyOption({ option: '1kg', cost: 8000, targetPay: 14900, instantCoupon: 2000, targetDiscount: 0.55 }));
@@ -1659,14 +1666,27 @@ function App() {
 
   const addProduct = (seed) => {
     const o = emptyOption(seed ? { ...seed, id: uid() } : {});
-    const p = { id: uid(), channel, name: '새 상품', options: [o] };
+    const p = { id: uid(), channel, name: '', options: [o] };
     update((d) => ({ ...d, products: [...d.products, p] }));
-    setTab('list'); setEditing({ pid: p.id, oid: o.id });
+    setTab('list'); setEditing({ pid: p.id, oid: o.id, focus: 'name' });
   };
   const addOption = (pid) => {
     const o = emptyOption();
     setProduct(pid, (p) => ({ ...p, options: [...p.options, o] }));
-    setEditing({ pid, oid: o.id });
+    setEditing({ pid, oid: o.id, focus: 'option' });
+  };
+  // 규격 복사: 원가·판매가·쿠폰·산지 등 입력값은 그대로, 쿠팡 옵션 ID·판매 실적·가격 변동 기록은 비우고 원본 바로 아래에 넣는다
+  const copyOption = (pid, oid) => {
+    const id = uid();
+    setProduct(pid, (p) => {
+      const i = p.options.findIndex((o) => o.id === oid);
+      if (i < 0) return p;
+      const src = p.options[i];
+      const copy = { ...src, id, option: src.option ? `${src.option} 복사` : '', optionId: '', priceHistory: [], priceFrom: '', priceMemo: '',
+        periodFrom: '', periodTo: '', ...Object.fromEntries(SALES_FIELDS.map((k) => [k, ''])) };
+      return { ...p, options: [...p.options.slice(0, i + 1), copy, ...p.options.slice(i + 1)] };
+    });
+    setEditing({ pid, oid: id, focus: 'option' });
   };
 
   const onImportFile = async (e) => {
@@ -1871,7 +1891,7 @@ function App() {
                   }}
                   onCategory=${(patch) => setProduct(p.id, (x) => ({ ...x, ...patch }))} sendLabel=${otherTo + ' 보내기'} onSend=${() => sendProduct(p)}
                   onRename=${(name) => setProduct(p.id, (x) => ({ ...x, name }))}
-                  onEdit=${(oid) => setEditing({ pid: p.id, oid })}
+                  onEdit=${(oid) => setEditing({ pid: p.id, oid })} onCopy=${(oid) => copyOption(p.id, oid)}
                   onAdd=${() => addOption(p.id)}
                   onDelete=${() => setConfirm({ title: `"${p.name}" 상품을 삭제할까요?`, body: `규격 ${p.options.length}개와 입력한 판매·비용 값이 함께 지워집니다.`, action: '삭제',
                     onConfirm: () => update((d) => ({ ...d, products: d.products.filter((x) => x.id !== p.id) })) })} />`)
@@ -1940,11 +1960,15 @@ function App() {
           <div class="flex flex-col">
             <div class="sticky top-0 z-header flex flex-wrap items-end gap-3 border-b border-line bg-surface px-5 py-4">
               <div class="flex min-w-0 flex-1 flex-col gap-1">
-                <h2 id="edit-title" class="truncate text-xs font-medium text-muted">${ed.name}</h2>
-                <input aria-label="규격 / 옵션" placeholder="예: 3kg" value=${edOpt.option}
+                <h2 id="edit-title" class="sr-only">상품과 규격 편집</h2>
+                <input id="edit-pname" aria-label="상품명" placeholder="상품명을 입력하세요 (예: [단독특가] 꿀당도 감홍사과)" value=${ed.name}
+                  class="w-full min-w-0 rounded bg-transparent px-1 -mx-1 text-sm font-medium text-muted outline-none placeholder:text-warn hover:bg-soft focus:bg-soft focus:text-fg"
+                  onChange=${(e) => setProduct(ed.id, (x) => ({ ...x, name: e.target.value }))} />
+                <input id="edit-option" aria-label="규격 / 옵션" placeholder="규격 (예: 3kg)" value=${edOpt.option}
                   class="w-full min-w-0 rounded bg-transparent px-1 -mx-1 text-lg font-semibold outline-none hover:bg-soft focus:bg-soft"
                   onChange=${(e) => setOption(ed.id, edOpt.id, { option: e.target.value })} />
               </div>
+              <button type="button" class="rounded-md border border-line px-3 py-2 text-sm hover:bg-soft" onClick=${() => copyOption(ed.id, edOpt.id)}>이 규격 복사</button>
               <button type="button" class="rounded-md px-3 py-2 text-sm text-muted hover:bg-soft hover:text-neg"
                 onClick=${() => setConfirm({ title: `"${edOpt.option || '규격'}" 규격을 삭제할까요?`, body: '이 규격의 가격·판매·비용 입력값이 지워집니다.', action: '삭제',
                   onConfirm: () => { setProduct(ed.id, (p) => ({ ...p, options: p.options.filter((o) => o.id !== edOpt.id) })); setEditing(null); } })}>규격 삭제</button>
