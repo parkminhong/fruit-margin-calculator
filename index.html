@@ -274,20 +274,43 @@ function suggestLinks(items, calc) {
   return out;
 }
 
-// 그 달에 적용할 단가: 연결된 가격 구간들을 적용 기간 겹치는 일수로, 기간이 없으면 계산기 총판매개수로 가중평균
+// ───────────── 가격 변동 기록 ─────────────
+// 규격(option)의 최상위 값이 '현재 가격'이고 priceFrom이 그 시작일이다. 이전 가격은 priceHistory에 시작일 순으로 쌓인다.
+// 이전 구간에 sales가 있으면 그 가격으로 팔린 실적이라, 계산기 합계는 현재 + 이전 구간을 각각 계산해 더한다.
+const PRICE_FIELDS = ['cost', 'extraCost', 'targetPay', 'instantCoupon', 'downloadCoupon', 'supplier', 'supplierItem'];
+const SALES_FIELDS = ['totalSales', 'trialCount', 'trialPrice', 'adCost', 'cs'];
+const pickKeys = (o, keys) => Object.fromEntries(keys.map((k) => [k, o?.[k] ?? '']));
+const hasSales = (x) => SALES_FIELDS.some((k) => x?.[k] !== '' && x?.[k] != null && num(x[k]) !== 0);
+function rowsOf(o) {
+  const past = (o.priceHistory || []).filter((e) => hasSales(e.sales))
+    .map((e) => ({ ...o, ...pickKeys(e, PRICE_FIELDS), ...pickKeys(e.sales, SALES_FIELDS), _past: e }));
+  return [o, ...past];
+}
+const rowsOfAll = (options) => options.flatMap(rowsOf);
+// 가격 구간 목록 (오래된 것부터): 이전 구간들 + 현재. 끝 날짜는 다음 구간 시작 전날
+function segmentsOf(o) {
+  const segs = [...(o.priceHistory || []).map((e) => ({ v: { ...o, ...pickKeys(e, PRICE_FIELDS) }, from: e.from || '', units: num(e.sales?.totalSales) })),
+    { v: o, from: o.priceFrom || o.periodFrom || '', units: num(o.totalSales) }];
+  return segs.map((sg, i) => ({ ...sg, to: i < segs.length - 1 ? (segs[i + 1].from ? addDays(segs[i + 1].from, -1) : '') : (o.periodTo || '') }));
+}
+
+// 그 달에 적용할 단가: 연결된 규격의 가격 구간들을 그 달과 겹치는 일수로 가중평균한다.
+// 날짜가 빠진 구간이 있으면 일수를 알 수 없어 구간별 판매수(계산기 총판매개수)로 가중평균한다.
 function unitFor(blocks, m, fallbackFee = 0) {
   if (!blocks.length) return null;
   const from = `${m}-01`, to = monthEnd(m);
-  const dated = blocks.every((b) => b.periodFrom && b.periodTo);
-  let ws = blocks.map((b) => {
-    if (dated) { const a = b.periodFrom > from ? b.periodFrom : from, z = b.periodTo < to ? b.periodTo : to; return a <= z ? daysBetween(a, z) : 0; }
-    return Math.max(0, num(b.totalSales));
-  });
-  if (!ws.some((w) => w > 0)) ws = blocks.map(() => 1);
+  const parts = blocks.flatMap((b) => segmentsOf(b).map((sg, i) => ({ ...sg, first: i === 0, b })));
+  // 첫 구간만 시작일을 비울 수 있고(끝 날짜가 있을 때), 나머지는 시작일이 있어야 날짜로 나눌 수 있다
+  const dated = parts.every((x) => x.from || (x.first && x.to));
+  const overlap = (x) => { const a = !x.from || x.from < from ? from : x.from, z = !x.to || x.to > to ? to : x.to; return a <= z ? daysBetween(a, z) : 0; };
+  let ws = parts.map((x) => (dated ? overlap(x) : Math.max(0, x.units)));
+  // 기록된 구간보다 앞이나 뒤의 달이면, 가장 가까운 구간(블록마다 첫 구간 또는 마지막 구간)의 가격을 쓴다
+  if (!ws.some((w) => w > 0) && dated) ws = parts.map((x, i) => { const own = parts.filter((y) => y.b === x.b); return (x === own[0] && own[0].from > to) || (x === own[own.length - 1] && !(own[0].from > to)) ? 1 : 0; });
+  if (!ws.some((w) => w > 0)) ws = parts.map(() => 1);
   const W = ws.reduce((a, w) => a + w, 0);
-  const avg = (f) => blocks.reduce((a, b, i) => a + ws[i] * f(b), 0) / W;
-  return { cost: avg((b) => num(b.cost) + num(b.extraCost)), fee: avg((b) => num(b._fee ?? fallbackFee)), coupon: avg((b) => num(b.instantCoupon) + num(b.downloadCoupon)),
-    salePrice: avg((b) => calcRow(b, { priceUnit: 100 }).salePrice), dated, blocks: blocks.length };
+  const avg = (f) => parts.reduce((a, x, i) => a + ws[i] * f(x.v, x.b), 0) / W;
+  return { cost: avg((v) => num(v.cost) + num(v.extraCost)), fee: avg((v, b) => num(b._fee ?? fallbackFee)), coupon: avg((v) => num(v.instantCoupon) + num(v.downloadCoupon)),
+    salePrice: avg((v) => calcRow(v, { priceUnit: 100 }).salePrice), dated, blocks: parts.length };
 }
 
 // 쿠폰 화면의 '사용 금액'은 쿠폰 기간 누적이라, 지난달까지 입력한 누적을 빼서 그 달 사용분을 구한다
@@ -537,10 +560,12 @@ function buildWorkbook(data) {
     '쿠팡 정상가', '쿠팡 판매가', '즉시할인 쿠폰 금액', '다운로드 쿠폰 금액', '최종 결제금액', '최종 할인율', '개당 마진', '마진율',
     '실제 판매개수', '체험단개수', '체험단 단가', '총판매개수', '수익', '광고비(쿠팡애즈)', '마케팅비(체험단)', '비용 차감 순수익', 'END ROAS', 'CS 차감액', '최종 순수익'];
   const rows = [['판매수수료율', g.feeRate, '가격 단위', g.priceUnit, '광고비 VAT', g.adVat], [], head];
-  for (const p of data.products) for (const o of p.options) {
+  for (const p of data.products) for (const base of p.options) for (const seg of [...(base.priceHistory || []).map((e) => ({ ...base, ...pickKeys(e, PRICE_FIELDS), ...pickKeys(e.sales, SALES_FIELDS), _from: e.from || '', _to: '' })),
+    { ...base, _from: base.priceFrom || base.periodFrom || '', _to: base.periodTo || '' }]) {
+    const o = seg;
     const f = feeOf(p, g);
     const c = calcRow(o, { ...g, feeRate: f.rate });
-    rows.push([p.name, p.category ? categoryLabel(p.category) : '', f.rate, o.option, o.optionId || '', o.periodFrom || '', o.periodTo || '', o.supplier || '', o.supplierItem || '', num(o.cost), num(o.extraCost), num(o.targetPay), num(o.instantCoupon), num(o.downloadCoupon), num(o.targetDiscount),
+    rows.push([p.name, p.category ? categoryLabel(p.category) : '', f.rate, o.option, o.optionId || '', o._from, o._to, o.supplier || '', o.supplierItem || '', num(o.cost), num(o.extraCost), num(o.targetPay), num(o.instantCoupon), num(o.downloadCoupon), num(o.targetDiscount),
       c.listPrice, c.salePrice, c.instantCouponAmt, c.downloadCouponAmt, c.pay, c.finalDiscount, Math.round(c.margin), c.marginRate,
       c.realSales ?? '수량확인', o.trialCount, o.trialPrice, o.totalSales, c.revenue == null ? '수량확인' : Math.round(c.revenue),
       c.adCost, Math.round(c.trialCost), c.netAfterCost == null ? '수량확인' : Math.round(c.netAfterCost),
@@ -574,7 +599,7 @@ function NumField({ id, label, value, onChange, kind = 'won', hint, error }) {
       <span class=${'flex items-center rounded-md border bg-surface px-2.5 focus-within:border-accent ' + (error ? 'border-neg' : 'border-line')}>
         <input id=${id} type="text" inputmode=${kind === 'int' ? 'numeric' : 'decimal'} autocomplete="off"
           class="w-full min-w-0 bg-transparent py-2 text-right text-sm outline-none" value=${shown}
-          onFocus=${() => setDraft(value === '' || value == null ? '' : kind === 'pct' ? String(+(num(value) * 100).toFixed(2)) : String(value))}
+          onFocus=${() => setDraft(shown)}
           onChange=${(e) => { setDraft(e.target.value); commit(e.target.value); }}
           onBlur=${() => setDraft(null)} />
         <span class="pl-1.5 text-xs text-muted">${suffix}</span>
@@ -650,7 +675,7 @@ function OptionForm({ opt, set, settings, idp, pickedPrice }) {
               <${TextField} id=${idp + 'pf'} type="date" label="적용 시작일" value=${opt.periodFrom} onChange=${(v) => set({ periodFrom: v })} />
               <${TextField} id=${idp + 'pt'} type="date" label="적용 종료일" value=${opt.periodTo} onChange=${(v) => set({ periodTo: v })} />
             </div>
-            <p class="text-xs text-muted text-pretty">가격을 바꾼 날 기준으로 기간을 넣으면, 월별 분석에서 그 달에 해당하는 매입원가와 쿠폰 설정을 씁니다. 기간이 없으면 총판매개수 비율로 섞어 씁니다.</p>
+            <p class="text-xs text-muted text-pretty">판매를 시작하고 끝낸 날입니다. 가격이 바뀐 날은 아래 '가격 변동 기록'으로 남기세요. 월별 분석은 그 달에 해당하는 가격 구간의 원가와 쿠폰을 씁니다.</p>
           </fieldset>` : null}
       </div>
 
@@ -678,6 +703,7 @@ function OptionForm({ opt, set, settings, idp, pickedPrice }) {
           </dl>
         </section>
       </div>
+      ${idp !== 'q-' ? html`<div class="min-w-0 md:col-span-2"><${PriceHistory} opt=${opt} set=${set} settings=${settings} idp=${idp} /></div>` : null}
     </div>`;
 }
 
@@ -703,7 +729,7 @@ function Confirm({ state, onClose }) {
       ${state && html`
         <div class="flex flex-col gap-4 p-5">
           <h2 id="confirm-title" class="text-base font-semibold text-balance">${state.title}</h2>
-          <p class="text-sm text-muted text-pretty">${state.body}</p>
+          <p class="whitespace-pre-line text-sm text-muted text-pretty">${state.body}</p>
           <div class="flex justify-end gap-2">
             <button type="button" class="rounded-md border border-line px-3 py-2 text-sm hover:bg-soft" onClick=${onClose}>취소</button>
             <button type="button" class=${'rounded-md px-3 py-2 text-sm font-medium ' + (state.tone === 'accent' ? 'bg-accent text-accent-fg hover:bg-accent/90' : 'bg-neg text-white hover:bg-neg/90')}
@@ -743,7 +769,7 @@ function Summary({ t }) {
 }
 
 function ProductCard({ p, settings, fee, onRename, onEdit, onAdd, onDelete, onSend, sendLabel, onCategory, onToggle, move }) {
-  const t = calcTotals(p.options, settings);
+  const t = calcTotals(rowsOfAll(p.options), settings);
   const open = !p.collapsed;
   return html`
     <section class=${'rounded-xl border bg-surface ' + (move.over ? 'border-accent ring-2 ring-accent/30' : 'border-line') + (move.dragging ? ' opacity-50' : '')}
@@ -798,19 +824,26 @@ function ProductCard({ p, settings, fee, onRename, onEdit, onAdd, onDelete, onSe
           <tbody>
             ${p.options.map((o) => {
               const c = calcRow(o, settings);
+              const rs = rowsOf(o), cs = rs.map((r) => calcRow(r, settings));
+              const qtyError = cs.some((x) => x.qtyError);
+              const net = cs.some((x) => x.finalNet == null) ? null : cs.reduce((a, x) => a + x.finalNet, 0);
+              const prev = (o.priceHistory || []).slice(-1)[0];
+              const delta = (k) => num(o[k]) - num(prev?.[k]);
+              const arrow = (d) => (d > 0 ? '▲' : '▼') + wonShort(Math.abs(d));
               return html`
                 <tr key=${o.id} class="cursor-pointer border-t border-line text-right hover:bg-soft [&>td]:px-3 [&>td]:py-2.5" onClick=${() => onEdit(o.id)}>
                   <td class="text-left font-medium">${o.option || html`<span class="text-muted">규격 없음</span>`}${o.periodFrom || o.periodTo
                     ? html`<div class="text-xs font-normal text-muted">${o.periodFrom ? shortDate(o.periodFrom) : ''} ~ ${o.periodTo ? shortDate(o.periodTo) : ''}</div>` : null}${o.supplier || o.supplierItem
-                    ? html`<div class="max-w-[14rem] truncate text-xs font-normal text-muted" title=${[o.supplier, o.supplierItem].filter(Boolean).join(' · ')}>산지 ${[o.supplier, o.supplierItem].filter(Boolean).join(' · ')}</div>` : null}</td>
+                    ? html`<div class="max-w-[14rem] truncate text-xs font-normal text-muted" title=${[o.supplier, o.supplierItem].filter(Boolean).join(' · ')}>산지 ${[o.supplier, o.supplierItem].filter(Boolean).join(' · ')}</div>` : null}${prev
+                    ? html`<div class="text-xs font-normal text-warn">${[delta('cost') ? '원가 ' + arrow(delta('cost')) : '', delta('targetPay') ? '판매가 ' + arrow(delta('targetPay')) : ''].filter(Boolean).join(' · ') || '가격 변동'}${o.priceFrom ? ` · ${shortDate(o.priceFrom)}~` : ''}${rs.length > 1 ? ` · 이전 ${rs.length - 1}구간 실적 포함` : ''}</div>` : null}</td>
                   <td>${won(c.pay)}</td>
                   <td><span>${wonShort(c.listPrice)}</span> <span class="text-muted">${pct(c.finalDiscount, 0)}</span></td>
                   <td><span class=${tone(c.margin)}>${wonShort(c.margin)}</span> <span class="text-muted">${pct(c.marginRate)}</span></td>
                   <td>${c.endRoas == null ? html`<span class="text-neg">산출불가</span>` : pct(c.endRoas, 0)}</td>
-                  <td>${c.qtyError ? html`<span class="rounded bg-warn/15 px-1.5 py-0.5 text-xs font-medium text-warn">수량 확인</span>`
-                    : html`${cnt(num(o.totalSales))} <span class="text-muted">· ${num(o.trialCount)}</span>`}</td>
-                  <td>${wonShort(c.adCost)}</td>
-                  <td class=${'font-semibold ' + tone(c.finalNet)}>${c.finalNet == null ? '–' : wonShort(c.finalNet)}</td>
+                  <td>${qtyError ? html`<span class="rounded bg-warn/15 px-1.5 py-0.5 text-xs font-medium text-warn">수량 확인</span>`
+                    : html`${cnt(rs.reduce((a, r) => a + num(r.totalSales), 0))} <span class="text-muted">· ${rs.reduce((a, r) => a + num(r.trialCount), 0)}</span>`}</td>
+                  <td>${wonShort(cs.reduce((a, x) => a + x.adCost, 0))}</td>
+                  <td class=${'font-semibold ' + tone(net)}>${net == null ? '–' : wonShort(net)}</td>
                   <td><button type="button" class="whitespace-nowrap rounded px-2 py-1 text-xs text-muted hover:bg-line hover:text-fg"
                     onClick=${(e) => { e.stopPropagation(); onEdit(o.id); }}>편집</button></td>
                 </tr>`;
@@ -819,6 +852,86 @@ function ProductCard({ p, settings, fee, onRename, onEdit, onAdd, onDelete, onSe
         </table>
       </div>
     </section>`;
+}
+
+// ───────────── 가격 변동 기록 (규격 편집 창) ─────────────
+function PriceHistory({ opt, set, settings, idp }) {
+  const [draft, setDraft] = useState(null);
+  const [askDel, setAskDel] = useState(null);
+  const hist = opt.priceHistory || [];
+  const marginOf = (v) => calcRow({ ...opt, ...v }, settings);
+  const startDraft = () => setDraft({ from: ymd(new Date()), ...pickKeys(opt, PRICE_FIELDS), memo: '', moveSales: hasSales(opt) });
+  const fromError = draft && (!draft.from ? '적용일을 넣으세요' : opt.priceFrom && draft.from <= opt.priceFrom ? `현재 가격 시작일(${opt.priceFrom})보다 뒤여야 합니다` : null);
+  const record = () => {
+    if (fromError) return;
+    const prevEntry = { id: uid(), from: opt.priceFrom || '', ...pickKeys(opt, PRICE_FIELDS), memo: opt.priceMemo || '',
+      ...(draft.moveSales && hasSales(opt) ? { sales: pickKeys(opt, SALES_FIELDS) } : {}) };
+    set({ ...pickKeys(draft, PRICE_FIELDS), priceFrom: draft.from, priceMemo: draft.memo, priceHistory: [...hist, prevEntry],
+      ...(draft.moveSales ? Object.fromEntries(SALES_FIELDS.map((k) => [k, ''])) : {}) });
+    setDraft(null);
+  };
+  const setEntry = (id, patch) => set({ priceHistory: hist.map((e) => (e.id === id ? { ...e, ...patch } : e)).sort((a, b) => (a.from || '') < (b.from || '') ? -1 : 1) });
+  const row = (key, label, from, v, memo, sales, actions) => {
+    const c = marginOf(v);
+    return html`
+      <tr key=${key} class="border-t border-line text-right align-top [&>td]:px-2 [&>td]:py-2">
+        <td class="text-left">${label}<div class="mt-1 w-36">${from}</div></td>
+        <td>${wonShort(num(v.cost) + num(v.extraCost))}</td>
+        <td>${wonShort(v.targetPay)}</td>
+        <td>${wonShort(num(v.instantCoupon) + num(v.downloadCoupon))}</td>
+        <td><span class=${tone(c.margin)}>${wonShort(c.margin)}</span><div class="text-xs text-muted">${pct(c.marginRate)}</div></td>
+        <td class="max-w-[10rem] text-left text-xs text-muted">${[v.supplier, memo].filter(Boolean).join(' · ') || '–'}${sales ? html`<div class="text-fg">실적 ${cnt(num(sales.totalSales))}${num(sales.adCost) ? ' · 광고 ' + wonShort(sales.adCost) : ''}</div>` : null}</td>
+        <td class="whitespace-nowrap">${actions}</td>
+      </tr>`;
+  };
+  return html`
+    <fieldset class="flex min-w-0 flex-col gap-3 border-t border-line pt-5">
+      <legend class="sr-only">가격 변동 기록</legend>
+      <h3 class="text-sm font-semibold">가격 변동 기록 <span class="font-normal text-muted">· 원가·판매가·쿠폰이 바뀐 날을 남깁니다</span></h3>
+      <div class="relative overflow-x-auto rounded-lg border border-line">
+        <table class="w-full min-w-[640px] text-sm tabular-nums">
+          <thead class="bg-soft text-xs text-muted"><tr class="text-right [&>th]:px-2 [&>th]:py-2 [&>th]:font-medium">
+            <th class="text-left">구간 · 시작일</th><th>원가(+추가)</th><th>결제금액</th><th>쿠폰</th><th>개당 마진</th><th class="text-left">산지 · 메모</th><th><span class="sr-only">관리</span></th></tr></thead>
+          <tbody>
+            ${row('cur', html`<b>현재 가격</b>`, html`<${TextField} id=${idp + 'pfrom'} type="date" label="" value=${opt.priceFrom || ''} onChange=${(v) => set({ priceFrom: v })} />`,
+              opt, opt.priceMemo, null, null)}
+            ${hist.slice().reverse().map((e) => row(e.id, html`<span class="text-muted">이전 가격</span>`,
+              html`<${TextField} id=${idp + 'h-' + e.id} type="date" label="" value=${e.from || ''} onChange=${(v) => setEntry(e.id, { from: v })} />`,
+              e, e.memo, hasSales(e.sales) ? e.sales : null,
+              askDel === e.id
+                ? html`<button type="button" class="rounded bg-neg px-2 py-1 text-xs font-medium text-white" onClick=${() => { set({ priceHistory: hist.filter((x) => x.id !== e.id) }); setAskDel(null); }}>삭제 확인</button>
+                    <button type="button" class="rounded px-2 py-1 text-xs text-muted hover:bg-soft" onClick=${() => setAskDel(null)}>취소</button>`
+                : html`<button type="button" class="rounded px-2 py-1 text-xs text-muted hover:bg-soft hover:text-neg" onClick=${() => setAskDel(e.id)}>삭제</button>`))}
+          </tbody>
+        </table>
+      </div>
+      ${askDel && hasSales(hist.find((x) => x.id === askDel)?.sales) ? html`<p class="text-xs text-warn">이 구간의 판매 실적도 함께 지워져 순수익 합계가 바뀝니다.</p>` : null}
+      ${draft ? html`
+        <div class="flex flex-col gap-3 rounded-lg border border-accent/40 bg-accent/5 p-3">
+          <div class="grid grid-cols-2 gap-3 sm:grid-cols-3">
+            <div>
+              <${TextField} id=${idp + 'd-from'} type="date" label="새 가격 적용일" value=${draft.from} onChange=${(v) => setDraft((d) => ({ ...d, from: v }))} />
+              ${fromError ? html`<p class="mt-1 text-xs text-neg">${fromError}</p>` : null}
+            </div>
+            ${[['cost', '매입원가'], ['extraCost', '추가원가'], ['targetPay', '목표 결제금액'], ['instantCoupon', '즉시할인 쿠폰'], ['downloadCoupon', '다운로드 쿠폰']].map(([k, label]) => html`
+              <${NumField} key=${k} id=${idp + 'd-' + k} label=${label} kind="won" value=${draft[k]} onChange=${(v) => setDraft((d) => ({ ...d, [k]: v }))} />`)}
+            <${TextField} id=${idp + 'd-sup'} label="산지 이름" value=${draft.supplier} onChange=${(v) => setDraft((d) => ({ ...d, supplier: v }))} />
+            <div class="col-span-2"><${TextField} id=${idp + 'd-memo'} label="메모" value=${draft.memo} placeholder="예: 작황 부진으로 원가 인상" onChange=${(v) => setDraft((d) => ({ ...d, memo: v }))} /></div>
+          </div>
+          <p class="text-sm tabular-nums">새 가격의 개당 마진 <b class=${tone(marginOf(draft).margin)}>${won(marginOf(draft).margin)}</b>
+            <span class="text-muted">(지금 ${won(marginOf(opt).margin)}, ${(() => { const d = marginOf(draft).margin - marginOf(opt).margin; return (d >= 0 ? '+' : '−') + won(Math.abs(d)); })()})</span></p>
+          ${hasSales(opt) ? html`<label class="flex items-start gap-2 text-sm"><input type="checkbox" class="mt-0.5 size-4 accent-[rgb(var(--accent))]" checked=${draft.moveSales} onChange=${(e) => setDraft((d) => ({ ...d, moveSales: e.target.checked }))} />
+            <span>지금까지 입력한 판매량·체험단·광고비·CS를 이전 가격 구간의 실적으로 옮기기 <span class="text-muted">(옮기면 이전 가격으로 계산된 순수익이 그대로 남고, 새 가격 구간은 0부터 시작합니다)</span></span></label>` : null}
+          <div class="flex justify-end gap-2">
+            <button type="button" class="rounded-md border border-line px-3 py-1.5 text-sm hover:bg-soft" onClick=${() => setDraft(null)}>취소</button>
+            <button type="button" disabled=${!!fromError} class="rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-accent-fg disabled:opacity-50" onClick=${record}>변동 기록</button>
+          </div>
+        </div>` : html`
+        <div class="flex flex-wrap items-center gap-3">
+          <button type="button" class="rounded-md border border-accent/50 bg-accent/5 px-3 py-1.5 text-sm font-medium text-accent hover:bg-accent/10" onClick=${startDraft}>가격 변동 기록하기</button>
+          <p class="min-w-0 flex-1 basis-60 text-xs text-muted text-pretty">지금 가격은 '이전 가격'으로 남고, 새 값이 현재 가격이 됩니다. 이전 구간의 판매 실적은 상품 표 합계와 월별 분석에 그대로 들어갑니다.</p>
+        </div>`}
+    </fieldset>`;
 }
 
 // ───────────── 월별 분석 화면 ─────────────
@@ -1455,7 +1568,7 @@ function App() {
   const chProducts = data.products.filter((p) => channelOf(p) === channel);
   const allRows = chProducts.flatMap((p) => p.options);
   const feeMissing = g.feeRate === '' || g.feeRate == null;
-  const totals = sumTotals(chProducts.map((p) => calcTotals(p.options, settingsFor(p, g))));
+  const totals = sumTotals(chProducts.map((p) => calcTotals(rowsOfAll(p.options), settingsFor(p, g))));
 
   const update = (fn) => setData((d) => ({ ...fn(d), isExample: false }));
   const setSettings = (patch) => update((d) => ({ ...d, [settingsKey(channel)]: { ...(d[settingsKey(channel)] || DEFAULT_TOSS_SETTINGS), ...patch } }));
@@ -1486,7 +1599,8 @@ function App() {
   const otherTo = other === 'toss' ? '토스로' : '쿠팡으로';
   const sendProduct = (p) => {
     const copy = { ...p, id: uid(), channel: other, options: p.options.map((o) => ({ ...o, id: uid(),
-      optionId: '', totalSales: '', trialCount: '', trialPrice: '', adCost: '', cs: '' })) };
+      optionId: '', totalSales: '', trialCount: '', trialPrice: '', adCost: '', cs: '',
+      priceHistory: (o.priceHistory || []).map(({ sales, ...e }) => ({ ...e, id: uid() })) })) };
     const doSend = () => {
       update((d) => ({ ...d, products: [...d.products, copy] }));
       setNotice({ kind: 'ok', text: `"${p.name}" 상품(규격 ${p.options.length}개)을 ${otherTo} 보냈습니다. 판매량·체험단·광고비·CS는 비워 두었습니다.`,
@@ -1508,6 +1622,38 @@ function App() {
     if (place === 'after') to += 1;
     list.splice(to, 0, item);
     return { ...d, products: list };
+  });
+  // 같은 판매처에서 이름이 같은 상품 묶음을 하나로: 규격별로 가장 마지막 묶음을 현재 가격, 앞 묶음들을 이전 가격 구간(실적 포함)으로
+  // 합칠 대상: 이름이 같은 상품이 여럿이거나, 한 상품 안에 같은 규격이 여러 번 있는 경우 (엑셀에서 불러온 가격 묶음)
+  const dupGroups = (() => {
+    const m = new Map();
+    for (const p of chProducts) { const k = p.name.trim(); m.set(k, [...(m.get(k) || []), p]); }
+    return [...m.values()].filter((g2) => {
+      const specs = g2.flatMap((p) => p.options.map((o) => String(o.option).trim()));
+      return g2.length > 1 || new Set(specs).size < specs.length;
+    }).map((g2) => ({ name: g2[0].name, n: g2.reduce((a, p) => a + p.options.length, 0), specs: new Set(g2.flatMap((p) => p.options.map((o) => String(o.option).trim()))).size }));
+  })();
+  const mergeDuplicates = () => update((d) => {
+    const groups = new Map();
+    for (const p of d.products) if (channelOf(p) === channel) { const k = p.name.trim(); groups.set(k, [...(groups.get(k) || []), p]); }
+    const merged = new Map();
+    for (const [k, ps] of groups) {
+      if (!dupGroups.some((x) => x.name.trim() === k)) continue;
+      const bySpec = new Map();
+      for (const p of ps) for (const o of p.options) { const sk = String(o.option).trim(); bySpec.set(sk, [...(bySpec.get(sk) || []), o]); }
+      const options = [...bySpec.values()].map((blocks) => {
+        const sorted = blocks.map((b, i) => ({ b, i })).sort((x, y) => ((x.b.priceFrom || x.b.periodFrom || '') === (y.b.priceFrom || y.b.periodFrom || '') ? x.i - y.i
+          : (x.b.priceFrom || x.b.periodFrom || '') < (y.b.priceFrom || y.b.periodFrom || '') ? -1 : 1)).map((x) => x.b);
+        const last = sorted[sorted.length - 1];
+        const history = sorted.slice(0, -1).flatMap((b) => [...(b.priceHistory || []),
+          { id: uid(), from: b.priceFrom || b.periodFrom || '', ...pickKeys(b, PRICE_FIELDS), memo: b.priceMemo || '', ...(hasSales(b) ? { sales: pickKeys(b, SALES_FIELDS) } : {}) }]);
+        const ids = [...new Set(sorted.flatMap(idsOf))];
+        return { ...last, priceFrom: last.priceFrom || last.periodFrom || '', periodFrom: sorted[0].periodFrom || '', priceHistory: [...history, ...(last.priceHistory || [])], optionId: ids.join(', ') };
+      });
+      merged.set(ps[0].id, { ...ps[0], category: ps.find((x) => x.category)?.category || '', options, collapsed: false });
+    }
+    const drop = new Set([...groups.entries()].filter(([k]) => dupGroups.some((x) => x.name.trim() === k)).flatMap(([, ps]) => ps.slice(1).map((x) => x.id)));
+    return { ...d, products: d.products.filter((x) => !drop.has(x.id)).map((x) => merged.get(x.id) || x) };
   });
   const setAllCollapsed = (collapsed) => update((d) => ({ ...d, products: d.products.map((x) => (channelOf(x) === channel ? { ...x, collapsed } : x)) }));
 
@@ -1700,6 +1846,10 @@ function App() {
                     : `${chName} 상품 ${chProducts.length}개 · 왼쪽 손잡이를 끌거나 ▲▼로 순서를 바꿉니다`}</p>
                   <button type="button" class="rounded-md border border-line px-2.5 py-1.5 text-sm hover:bg-soft" onClick=${() => setAllCollapsed(true)}>모두 접기</button>
                   <button type="button" class="rounded-md border border-line px-2.5 py-1.5 text-sm hover:bg-soft" onClick=${() => setAllCollapsed(false)}>모두 펴기</button>
+                  ${dupGroups.length ? html`<button type="button" class="rounded-md border border-accent/50 bg-accent/5 px-2.5 py-1.5 text-sm font-medium text-accent hover:bg-accent/10"
+                    onClick=${() => setConfirm({ title: `가격 묶음 ${dupGroups.length}개 품목을 합칠까요?`, tone: 'accent', action: '합치기',
+                      body: dupGroups.map((g2) => `• ${g2.name}: 규격 ${g2.n}개 → ${g2.specs}개`).join('\n') + '\n\n같은 규격이 여러 줄이면 마지막 줄이 현재 가격이 되고, 앞 줄들은 판매 실적과 함께 이전 가격 구간으로 들어갑니다. 순수익 합계는 바뀌지 않습니다. 묶음에 적용 시작일이 없으면 구간 날짜를 나중에 규격 편집 창에서 넣어 주세요.',
+                      onConfirm: () => { mergeDuplicates(); setNotice({ kind: 'ok', text: `${dupGroups.length}개 품목의 가격 묶음을 합쳤습니다. 각 규격의 '가격 변동 기록'에서 구간을 확인하세요.` }); } })}>가격 묶음 합치기 (${dupGroups.length})</button>` : null}
                 </div>` : null}
               ${query.trim() && chProducts.length && !shown.length ? html`
                 <div class="flex flex-col items-center gap-3 rounded-xl border border-dashed border-line px-4 py-10 text-center">
