@@ -796,8 +796,8 @@ function ProductCard({ p, settings, fee, onRename, onEdit, onCopy, onAdd, onDele
   return html`
     <section class=${'rounded-xl border bg-surface ' + (move.over ? 'border-accent ring-2 ring-accent/30' : 'border-line') + (move.dragging ? ' opacity-50' : '')}
       onDragOver=${move.onDragOver} onDragLeave=${move.onDragLeave} onDrop=${move.onDrop}>
-      <header class=${'flex flex-wrap items-center gap-x-4 gap-y-2 px-4 py-3 ' + (open ? 'border-b border-line' : '')}>
-        <div class="flex items-center gap-1">
+      <header class=${'grid grid-cols-[auto_minmax(0,1fr)] items-center gap-x-2 gap-y-2 px-4 py-3 ' + (open ? 'border-b border-line' : '')}>
+        <div class="row-span-2 flex items-center gap-1 self-center">
           ${move.enabled ? html`
             <span draggable="true" onDragStart=${move.onDragStart} onDragEnd=${move.onDragEnd} title="끌어서 순서 바꾸기"
               class="flex h-8 w-5 cursor-grab items-center justify-center rounded text-muted hover:bg-soft hover:text-fg active:cursor-grabbing" aria-hidden="true">
@@ -816,27 +816,30 @@ function ProductCard({ p, settings, fee, onRename, onEdit, onCopy, onAdd, onDele
             <svg aria-hidden="true" viewBox="0 0 12 12" class=${'size-3 ' + (open ? 'rotate-90' : '')} fill="currentColor"><path d="M4 2l5 4-5 4z"/></svg>
           </button>
         </div>
-        <input aria-label="상품명" placeholder="상품명을 입력하세요" class="min-w-0 flex-1 basis-64 placeholder:text-warn bg-transparent text-base font-semibold outline-none rounded px-1 -mx-1 hover:bg-soft focus:bg-soft"
-          value=${p.name} onChange=${(e) => onRename(e.target.value)} />
-        <div class="flex items-center gap-2 text-sm">
+        <div class="flex min-w-0 flex-wrap items-center gap-x-4 gap-y-1">
+          <input aria-label="상품명" placeholder="상품명을 입력하세요" class="min-w-0 flex-1 basis-full sm:basis-0 placeholder:text-warn bg-transparent text-base font-semibold outline-none rounded px-1 hover:bg-soft focus:bg-soft"
+            value=${p.name} onChange=${(e) => onRename(e.target.value)} />
+          <span class="shrink-0 whitespace-nowrap text-sm tabular-nums">${open ? null : html`<span class="text-muted">규격 ${p.options.length}개 · </span>`}순수익 <b class=${tone(t.finalNet)}>${won(t.finalNet)}</b></span>
+        </div>
+        <div class="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-2 text-sm">
           <label class="sr-only" for=${'cat-' + p.id}>카테고리</label>
           <select id=${'cat-' + p.id} value=${p.category || ''} onChange=${(e) => onCategory({ category: e.target.value })}
             class="rounded-md border border-line bg-surface px-2 py-1.5 text-sm">
             <option value="">카테고리 없음</option>
             ${CATEGORIES.map(([k, label]) => html`<option key=${k} value=${k}>${label}</option>`)}
           </select>
-          ${p.category === 'custom' ? html`<div class="w-28"><${NumField} id=${'cf-' + p.id} label="직접 수수료" kind="pct" value=${p.customFee ?? ''} onChange=${(v) => onCategory({ customFee: v })} /></div>` : null}
+          ${p.category === 'custom' ? html`<${CellNum} id=${'cf-' + p.id} label="직접 입력 수수료 (VAT 포함, %)" unit="%"
+            value=${p.customFee === '' || p.customFee == null ? '' : +(num(p.customFee) * 100).toFixed(4)} onChange=${(v) => onCategory({ customFee: v === '' ? '' : v / 100 })} />` : null}
           <span class="whitespace-nowrap text-xs tabular-nums text-muted" title="이 상품에 적용되는 판매수수료율 (VAT 포함)">수수료 ${pct(fee.rate, 2)} · ${fee.source}</span>
-        </div>
-        <span class="text-sm tabular-nums">${open ? null : html`<span class="text-muted">규격 ${p.options.length}개 · </span>`}순수익 <b class=${tone(t.finalNet)}>${won(t.finalNet)}</b></span>
-        <div class="flex gap-2">
-          <button type="button" class="rounded-md border border-line px-2.5 py-1.5 text-sm hover:bg-soft" onClick=${onAdd}>규격 추가</button>
-          <button type="button" class="rounded-md border border-line px-2.5 py-1.5 text-sm hover:bg-soft" onClick=${onSend}>${sendLabel}</button>
-          <button type="button" class="rounded-md px-2.5 py-1.5 text-sm text-muted hover:bg-soft hover:text-neg" onClick=${onDelete}>상품 삭제</button>
+          <div class="ml-auto flex flex-wrap justify-end gap-2">
+          <button type="button" class="whitespace-nowrap rounded-md border border-line px-2.5 py-1.5 text-sm hover:bg-soft" onClick=${onAdd}>규격 추가</button>
+          <button type="button" class="whitespace-nowrap rounded-md border border-line px-2.5 py-1.5 text-sm hover:bg-soft" onClick=${onSend}>${sendLabel}</button>
+          <button type="button" class="whitespace-nowrap rounded-md px-2.5 py-1.5 text-sm text-muted hover:bg-soft hover:text-neg" onClick=${onDelete}>상품 삭제</button>
+          </div>
         </div>
       </header>
       <div id=${'opts-' + p.id} hidden=${!open} class="relative overflow-x-auto">
-        <table class="w-full min-w-[760px] text-sm tabular-nums">
+        <table class="w-full min-w-[760px] whitespace-nowrap text-sm tabular-nums">
           <thead class="text-xs text-muted">
             <tr class="text-right [&>th]:px-3 [&>th]:py-2 [&>th]:font-medium">
               <th class="text-left">규격</th><th>결제금액</th><th>정상가 · 할인율</th><th>개당 마진</th><th>END ROAS</th>
@@ -866,7 +869,7 @@ function ProductCard({ p, settings, fee, onRename, onEdit, onCopy, onAdd, onDele
                     : html`${cnt(rs.reduce((a, r) => a + num(r.totalSales), 0))} <span class="text-muted">· ${rs.reduce((a, r) => a + num(r.trialCount), 0)}</span>`}</td>
                   <td>${wonShort(cs.reduce((a, x) => a + x.adCost, 0))}</td>
                   <td class=${'font-semibold ' + tone(net)}>${net == null ? '–' : wonShort(net)}</td>
-                  <td><button type="button" class="whitespace-nowrap rounded px-2 py-1 text-xs text-muted hover:bg-line hover:text-fg"
+                  <td class="whitespace-nowrap"><button type="button" class="whitespace-nowrap rounded px-2 py-1 text-xs text-muted hover:bg-line hover:text-fg"
                     onClick=${(e) => { e.stopPropagation(); onEdit(o.id); }}>편집</button><button type="button" aria-label=${(o.option || '규격') + ' 복사해서 추가'}
                     class="whitespace-nowrap rounded px-2 py-1 text-xs text-muted hover:bg-line hover:text-fg" onClick=${(e) => { e.stopPropagation(); onCopy(o.id); }}>복사</button></td>
                 </tr>`;
@@ -1959,7 +1962,7 @@ function App() {
               <${Summary} t=${totals} />
               ${chProducts.length ? html`
                 <div class="flex flex-wrap items-center gap-x-3 gap-y-2">
-                  <p class="min-w-0 flex-1 text-sm text-muted" aria-live="polite">${query.trim()
+                  <p class="min-w-0 flex-1 basis-64 text-sm text-muted" aria-live="polite">${query.trim()
                     ? `"${query.trim()}" 검색 결과 ${shown.length}개 / 전체 ${chProducts.length}개 · 위 합계는 전체 기준입니다 · 검색 중에는 순서를 바꿀 수 없습니다`
                     : `${chName} 상품 ${chProducts.length}개 · 왼쪽 손잡이를 끌거나 ▲▼로 순서를 바꿉니다`}</p>
                   <button type="button" class="rounded-md border border-line px-2.5 py-1.5 text-sm hover:bg-soft" onClick=${() => setAllCollapsed(true)}>모두 접기</button>
