@@ -281,16 +281,25 @@ const PRICE_FIELDS = ['cost', 'extraCost', 'targetPay', 'instantCoupon', 'downlo
 const SALES_FIELDS = ['totalSales', 'trialCount', 'trialPrice', 'adCost', 'cs'];
 const pickKeys = (o, keys) => Object.fromEntries(keys.map((k) => [k, o?.[k] ?? '']));
 const hasSales = (x) => SALES_FIELDS.some((k) => x?.[k] !== '' && x?.[k] != null && num(x[k]) !== 0);
+// 규격의 총판매개수(totalSales)는 이전 가격 구간까지 모두 합한 개수이고, 현재 구간 판매량은 거기서 이전 구간 합계를 뺀 값이다.
+const pastUnits = (o) => (o.priceHistory || []).reduce((a, e) => a + num(e.sales?.totalSales), 0);
+function currentUnits(o) {
+  if (!(o.priceHistory || []).length) return { units: o.totalSales, short: false };
+  if (o.totalSales === '' || o.totalSales == null) return { units: '', short: false };
+  const u = num(o.totalSales) - pastUnits(o);
+  return { units: Math.max(0, u), short: u < 0 }; // short: 총판매개수가 이전 구간 합계보다 적음
+}
 function rowsOf(o) {
+  const cur = currentUnits(o);
   const past = (o.priceHistory || []).filter((e) => hasSales(e.sales))
     .map((e) => ({ ...o, ...pickKeys(e, PRICE_FIELDS), ...pickKeys(e.sales, SALES_FIELDS), _past: e }));
-  return [o, ...past];
+  return [{ ...o, totalSales: cur.units, _short: cur.short }, ...past];
 }
 const rowsOfAll = (options) => options.flatMap(rowsOf);
 // 가격 구간 목록 (오래된 것부터): 이전 구간들 + 현재. 끝 날짜는 다음 구간 시작 전날
 function segmentsOf(o) {
   const segs = [...(o.priceHistory || []).map((e) => ({ v: { ...o, ...pickKeys(e, PRICE_FIELDS) }, from: e.from || '', units: num(e.sales?.totalSales) })),
-    { v: o, from: o.priceFrom || o.periodFrom || '', units: num(o.totalSales) }];
+    { v: o, from: o.priceFrom || o.periodFrom || '', units: num(currentUnits(o).units) }];
   return segs.map((sg, i) => ({ ...sg, to: i < segs.length - 1 ? (segs[i + 1].from ? addDays(segs[i + 1].from, -1) : '') : (o.periodTo || '') }));
 }
 
@@ -583,7 +592,7 @@ function buildWorkbook(data) {
     '실제 판매개수', '체험단개수', '체험단 단가', '총판매개수', '수익', '광고비(쿠팡애즈)', '마케팅비(체험단)', '비용 차감 순수익', 'END ROAS', 'CS 차감액', '최종 순수익'];
   const rows = [['판매수수료율', g.feeRate, '가격 단위', g.priceUnit, '광고비 VAT', g.adVat], [], head];
   for (const p of data.products) for (const base of p.options) for (const seg of [...(base.priceHistory || []).map((e) => ({ ...base, ...pickKeys(e, PRICE_FIELDS), ...pickKeys(e.sales, SALES_FIELDS), _from: e.from || '', _to: '' })),
-    { ...base, _from: base.priceFrom || base.periodFrom || '', _to: base.periodTo || '' }]) {
+    { ...base, totalSales: currentUnits(base).units, _from: base.priceFrom || base.periodFrom || '', _to: base.periodTo || '' }]) {
     const o = seg;
     const f = feeOf(p, g);
     const c = calcRow(o, { ...g, feeRate: f.rate });
@@ -640,9 +649,13 @@ function Line({ label, value, strong, sub, className = '' }) {
 
 // ───────────── 규격 편집 폼 (편집 패널 · 빠른 계산 공용) ─────────────
 function OptionForm({ opt, set, settings, idp, pickedPrice, insights, idShared }) {
-  const c = calcRow(opt, settings);
+  // 오른쪽 수익은 현재 가격 구간 기준 (총판매개수 − 이전 구간 판매량), 가격 변동 기록이 있으면 전체 구간 순수익도 함께
+  const rows = rowsOf(opt), c = calcRow(rows[0], settings);
+  const hasHist = (opt.priceHistory || []).length > 0;
+  const allNet = rows.map((r) => calcRow(r, settings)).reduce((a, x) => (a == null || x.finalNet == null ? null : a + x.finalNet), 0);
+  const shortMsg = rows[0]._short ? `총판매개수가 이전 가격 구간 판매량 합계(${cnt(pastUnits(opt))})보다 적습니다` : null;
   const f = (key, label, kind, hint) => html`<${NumField} id=${idp + key} label=${label} kind=${kind} hint=${hint}
-    value=${opt[key]} onChange=${(v) => set({ [key]: v })} error=${key === 'trialCount' || key === 'totalSales' ? c.qtyError : null} />`;
+    value=${opt[key]} onChange=${(v) => set({ [key]: v })} error=${key === 'trialCount' || key === 'totalSales' ? c.qtyError || (key === 'totalSales' ? shortMsg : null) : null} />`;
   return html`
     <div class="grid gap-6 md:grid-cols-[minmax(0,1fr)_minmax(0,20rem)]">
       <div class="flex flex-col gap-6 min-w-0">
@@ -675,11 +688,11 @@ function OptionForm({ opt, set, settings, idp, pickedPrice, insights, idShared }
         <fieldset class="flex flex-col gap-3">
           <legend class="mb-2 text-sm font-semibold">판매 · 체험단</legend>
           <div class="grid grid-cols-2 gap-3 sm:grid-cols-3">
-            ${f('totalSales', '총판매개수', 'int', '체험단 포함')}
+            ${f('totalSales', '총판매개수', 'int', (opt.priceHistory || []).length ? `전체 구간 합계 · 현재 가격 ${cnt(num(currentUnits(opt).units))}` : '체험단 포함')}
             ${f('trialCount', '체험단개수', 'int', '빈박스 발송')}
             ${f('trialPrice', '체험단 단가', 'won', '1건당 실제 지출')}
           </div>
-          ${c.qtyError ? html`<p role="alert" class="text-sm text-neg">${c.qtyError}</p>` : null}
+          ${c.qtyError || shortMsg ? html`<p role="alert" class="text-sm text-neg">${c.qtyError || shortMsg}</p>` : null}
         </fieldset>
         <fieldset class="flex flex-col gap-3">
           <legend class="mb-2 text-sm font-semibold">비용</legend>
@@ -721,7 +734,8 @@ function OptionForm({ opt, set, settings, idp, pickedPrice, insights, idShared }
             <${Line} label="광고비" value=${minus(c.adCost)} />
             <${Line} label="체험단 비용" value=${minus(c.trialCost)} />
             <${Line} label="CS" value=${minus(c.cs)} />
-            <${Line} label="최종 순수익" value=${html`<span class=${tone(c.finalNet)}>${c.finalNet == null ? '수량 확인' : won(c.finalNet)}</span>`} strong />
+            <${Line} label=${hasHist ? '현재 가격 순수익' : '최종 순수익'} value=${html`<span class=${tone(c.finalNet)}>${c.finalNet == null ? '수량 확인' : won(c.finalNet)}</span>`} strong=${!hasHist} />
+            ${hasHist ? html`<${Line} label="전체 구간 순수익" sub="이전 가격 포함" value=${html`<span class=${tone(allNet)}>${allNet == null ? '수량 확인' : won(allNet)}</span>`} strong />` : null}
           </dl>
         </section>
       </div>
@@ -850,7 +864,7 @@ function ProductCard({ p, settings, fee, onRename, onEdit, onCopy, onAdd, onDele
             ${p.options.map((o) => {
               const c = calcRow(o, settings);
               const rs = rowsOf(o), cs = rs.map((r) => calcRow(r, settings));
-              const qtyError = cs.some((x) => x.qtyError);
+              const qtyError = cs.some((x) => x.qtyError) || rs[0]._short;
               const net = cs.some((x) => x.finalNet == null) ? null : cs.reduce((a, x) => a + x.finalNet, 0);
               const prev = (o.priceHistory || []).slice(-1)[0];
               const delta = (k) => num(o[k]) - num(prev?.[k]);
@@ -905,17 +919,24 @@ function PriceHistory({ opt, set, settings, idp, insights, idShared = 0 }) {
   const fromError = draft && (!draft.from ? '적용일을 넣으세요' : opt.priceFrom && draft.from <= opt.priceFrom ? `현재 가격 시작일(${opt.priceFrom})보다 뒤여야 합니다` : null);
   const record = () => {
     if (fromError) return;
+    const curSales = { ...pickKeys(opt, SALES_FIELDS), totalSales: currentUnits(opt).units };
     const prevEntry = { id: uid(), from: opt.priceFrom || '', ...pickKeys(opt, PRICE_FIELDS), memo: opt.priceMemo || '',
-      ...(draft.moveSales && hasSales(opt) ? { sales: pickKeys(opt, SALES_FIELDS) } : {}) };
+      ...(draft.moveSales && hasSales(curSales) ? { sales: curSales } : {}) };
+    // 총판매개수는 전체 합계라 그대로 두고, 체험단·광고비·CS만 새 구간에서 0부터 시작
     set({ ...pickKeys(draft, PRICE_FIELDS), priceFrom: draft.from, priceMemo: draft.memo, priceHistory: [...hist, prevEntry],
-      ...(draft.moveSales ? Object.fromEntries(SALES_FIELDS.map((k) => [k, ''])) : {}) });
+      ...(draft.moveSales ? Object.fromEntries(SALES_FIELDS.filter((k) => k !== 'totalSales').map((k) => [k, ''])) : {}) });
     setDraft(null);
   };
   const setEntry = (id, patch) => set({ priceHistory: hist.map((e) => (e.id === id ? { ...e, ...patch } : e)).sort((a, b) => (a.from || '') < (b.from || '') ? -1 : 1) });
   // 구간 한 줄: 가격 + 그 가격으로 팔린 실적(판매량·체험단·광고비·CS)과 순수익
   const row = (key, label, from, v, memo, sales, setSales, actions) => {
-    const c = calcRow({ ...opt, ...pickKeys(v, PRICE_FIELDS), ...pickKeys(sales, SALES_FIELDS), trialPrice: sales?.trialPrice ?? opt.trialPrice }, settings);
-    const cell = (k, label2, unit) => html`<${CellNum} id=${idp + key + '-' + k} label=${label2} unit=${unit} value=${sales?.[k] ?? ''} onChange=${(x) => setSales({ [k]: x })} />`;
+    const c = calcRow({ ...opt, ...pickKeys(v, PRICE_FIELDS), ...pickKeys(sales, SALES_FIELDS), trialPrice: sales?.trialPrice ?? opt.trialPrice,
+      ...(key === 'cur' ? { totalSales: currentUnits(opt).units } : {}) }, settings);
+    const cell = (k, label2, unit) => (key === 'cur' && k === 'totalSales'
+      ? html`<span class="inline-flex flex-col items-end" title="총판매개수 − 이전 구간 판매량 합계 (자동)">
+          <span class=${'font-medium ' + (currentUnits(opt).short ? 'text-neg' : '')}>${cnt(num(currentUnits(opt).units))}</span>
+          <span class="whitespace-nowrap text-xs text-muted">총 ${cnt(num(opt.totalSales))} − 이전 ${cnt(pastUnits(opt))}</span></span>`
+      : html`<${CellNum} id=${idp + key + '-' + k} label=${label2} unit=${unit} value=${sales?.[k] ?? ''} onChange=${(x) => setSales({ [k]: x })} />`);
     return html`
       <tr key=${key} class="border-t border-line text-right align-top [&>td]:px-2 [&>td]:py-2">
         <td class="text-left">${label}<div class="mt-1 w-36">${from}</div></td>
@@ -970,13 +991,14 @@ function PriceHistory({ opt, set, settings, idp, insights, idShared = 0 }) {
             const key = i < segs.length - 1 ? hist[i]?.id : 'cur';
             const undated = i > 0 && !sg.from;
             return { key, label: i < segs.length - 1 ? '이전 가격' : '현재 가격', from: sg.from, to: sg.to, undated,
-              ...(undated ? { qty: null } : salesFromInsights(insights, ids, sg.from, sg.to)), now: num(i < segs.length - 1 ? hist[i]?.sales?.totalSales : opt.totalSales) };
+              ...(undated ? { qty: null } : salesFromInsights(insights, ids, sg.from, sg.to)), now: num(i < segs.length - 1 ? hist[i]?.sales?.totalSales : currentUnits(opt).units) };
           }));
         };
         const apply = () => {
           const byKey = Object.fromEntries(fill.filter((f) => f.qty != null && f.files).map((f) => [f.key, f.qty]));
-          set({ ...('cur' in byKey ? { totalSales: byKey.cur } : {}),
-            priceHistory: hist.map((e) => (e.id in byKey ? { ...e, sales: { trialPrice: opt.trialPrice ?? '', ...(e.sales || {}), totalSales: byKey[e.id] } } : e)) });
+          const newHist = hist.map((e) => (e.id in byKey ? { ...e, sales: { trialPrice: opt.trialPrice ?? '', ...(e.sales || {}), totalSales: byKey[e.id] } } : e));
+          const cur = 'cur' in byKey ? byKey.cur : num(currentUnits(opt).units);
+          set({ priceHistory: newHist, totalSales: newHist.reduce((a, e) => a + num(e.sales?.totalSales), 0) + cur });
           setFill(null);
         };
         return html`
@@ -1006,7 +1028,7 @@ function PriceHistory({ opt, set, settings, idp, insights, idShared = 0 }) {
               </div>` : null}
           </div>`;
       })()}
-      <p class="text-xs text-muted text-pretty">구간마다 그 가격으로 팔린 판매량·체험단·광고비·CS를 넣으면 구간별 순수익이 계산되고, 모두 더한 값이 상품 표와 전체 합계에 들어갑니다. 현재 가격 줄은 위 '판매 · 체험단', '비용' 칸과 같은 값입니다.</p>
+      <p class="text-xs text-muted text-pretty">구간마다 그 가격으로 팔린 판매량·체험단·광고비·CS를 넣으면 구간별 순수익이 계산되고, 모두 더한 값이 상품 표와 전체 합계에 들어갑니다. 편집 창 위쪽의 총판매개수는 모든 구간을 합한 개수이고, 현재 가격 줄의 판매량은 총판매개수에서 이전 구간 판매량을 뺀 값으로 자동 계산됩니다. 현재 가격 줄의 체험단·광고비·CS는 위 칸과 같은 값입니다.</p>
       ${askDel && hasSales(hist.find((x) => x.id === askDel)?.sales) ? html`<p class="text-xs text-warn">이 구간의 판매 실적도 함께 지워져 순수익 합계가 바뀝니다.</p>` : null}
       ${draft ? html`
         <div class="flex flex-col gap-3 rounded-lg border border-accent/40 bg-accent/5 p-3">
@@ -1023,7 +1045,7 @@ function PriceHistory({ opt, set, settings, idp, insights, idShared = 0 }) {
           <p class="text-sm tabular-nums">새 가격의 개당 마진 <b class=${tone(marginOf(draft).margin)}>${won(marginOf(draft).margin)}</b>
             <span class="text-muted">(지금 ${won(marginOf(opt).margin)}, ${(() => { const d = marginOf(draft).margin - marginOf(opt).margin; return (d >= 0 ? '+' : '−') + won(Math.abs(d)); })()})</span></p>
           ${hasSales(opt) ? html`<label class="flex items-start gap-2 text-sm"><input type="checkbox" class="mt-0.5 size-4 accent-[rgb(var(--accent))]" checked=${draft.moveSales} onChange=${(e) => setDraft((d) => ({ ...d, moveSales: e.target.checked }))} />
-            <span>지금까지 입력한 판매량·체험단·광고비·CS를 이전 가격 구간의 실적으로 옮기기 <span class="text-muted">(옮기면 이전 가격으로 계산된 순수익이 그대로 남고, 새 가격 구간은 0부터 시작합니다)</span></span></label>` : null}
+            <span>지금 가격 구간의 판매량·체험단·광고비·CS를 이전 가격 구간의 실적으로 옮기기 <span class="text-muted">(옮기면 이전 가격으로 계산된 순수익이 그대로 남습니다. 총판매개수는 전체 합계라 그대로 두고, 이후 늘어난 개수가 새 가격 구간 판매량이 됩니다)</span></span></label>` : null}
           <div class="flex justify-end gap-2">
             <button type="button" class="rounded-md border border-line px-3 py-1.5 text-sm hover:bg-soft" onClick=${() => setDraft(null)}>취소</button>
             <button type="button" disabled=${!!fromError} class="rounded-md bg-accent px-3 py-1.5 text-sm font-medium text-accent-fg disabled:opacity-50" onClick=${record}>변동 기록</button>
@@ -1754,9 +1776,13 @@ function App() {
           : (x.b.priceFrom || x.b.periodFrom || '') < (y.b.priceFrom || y.b.periodFrom || '') ? -1 : 1)).map((x) => x.b);
         const last = sorted[sorted.length - 1];
         const history = sorted.slice(0, -1).flatMap((b) => [...(b.priceHistory || []),
-          { id: uid(), from: b.priceFrom || b.periodFrom || '', ...pickKeys(b, PRICE_FIELDS), memo: b.priceMemo || '', ...(hasSales(b) ? { sales: pickKeys(b, SALES_FIELDS) } : {}) }]);
+          { id: uid(), from: b.priceFrom || b.periodFrom || '', ...pickKeys(b, PRICE_FIELDS), memo: b.priceMemo || '',
+            ...(hasSales({ ...b, totalSales: currentUnits(b).units }) ? { sales: { ...pickKeys(b, SALES_FIELDS), totalSales: currentUnits(b).units } } : {}) }]);
         const ids = [...new Set(sorted.flatMap(idsOf))];
-        return { ...last, priceFrom: last.priceFrom || last.periodFrom || '', periodFrom: sorted[0].periodFrom || '', priceHistory: [...history, ...(last.priceHistory || [])], optionId: ids.join(', ') };
+        const allHist = [...history, ...(last.priceHistory || [])];
+        const total = allHist.reduce((a, e) => a + num(e.sales?.totalSales), 0) + num(currentUnits(last).units);
+        return { ...last, priceFrom: last.priceFrom || last.periodFrom || '', periodFrom: sorted[0].periodFrom || '', priceHistory: allHist, optionId: ids.join(', '),
+          totalSales: last.totalSales === '' && !allHist.some((e) => e.sales?.totalSales) ? '' : total };
       });
       merged.set(ps[0].id, { ...ps[0], category: ps.find((x) => x.category)?.category || '', options, collapsed: false });
     }
